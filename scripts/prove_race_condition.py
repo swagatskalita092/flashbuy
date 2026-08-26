@@ -14,6 +14,9 @@ order, both decrement, and the second write is based on a stale count.
 
 Each request uses its own idempotency_key so a later, safe checkout still
 treats these as 50 distinct purchase attempts (retries are a separate test).
+
+This script sends X-FlashBuy-Test-Bypass so it measures inventory locking,
+not waiting-room drip-feed. That header is internal-only.
 """
 
 from __future__ import annotations
@@ -51,6 +54,7 @@ async def checkout_one(
             "buyer_id": buyer_id,
             "idempotency_key": str(uuid.uuid4()),
         },
+        headers={"X-FlashBuy-Test-Bypass": "1"},
     )
 
 

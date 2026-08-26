@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
+from app.metrics import set_stock
 from app.models import Product
 from app.schemas import ProductCreate, ProductOut
 
@@ -25,6 +26,7 @@ async def create_product(
     db.add(product)
     await db.commit()
     await db.refresh(product)
+    set_stock(str(product.id), product.stock)
     return product
 
 

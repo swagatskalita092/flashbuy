@@ -5,6 +5,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.metrics import set_stock
 from app.models import Product
 
 SEED_PRODUCT_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
@@ -18,6 +19,7 @@ async def seed_default_product(session: AsyncSession) -> Product:
     result = await session.execute(select(Product).where(Product.id == SEED_PRODUCT_ID))
     product = result.scalar_one_or_none()
     if product is not None:
+        set_stock(str(product.id), product.stock)
         return product
 
     product = Product(
@@ -29,4 +31,5 @@ async def seed_default_product(session: AsyncSession) -> Product:
     session.add(product)
     await session.commit()
     await session.refresh(product)
+    set_stock(str(product.id), product.stock)
     return product

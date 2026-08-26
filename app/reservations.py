@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.metrics import set_stock
 from app.models import Order, Product
 
 
@@ -34,5 +35,6 @@ async def expire_reservations(session: AsyncSession) -> int:
         product = product_result.scalar_one()
         order.status = "expired"
         product.stock += 1
+        set_stock(str(product.id), product.stock)
     await session.commit()
     return len(expired)
