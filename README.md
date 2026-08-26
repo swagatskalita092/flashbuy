@@ -2,6 +2,16 @@
 
 FlashBuy is a flash-sale checkout backend. It sells a limited number of units under concurrent demand without overselling, by combining a Redis waiting room, row-level locks in PostgreSQL, idempotency keys, and reservation expiry.
 
+Headline numbers from a Locust run of 500 concurrent users against a product with stock 500. Full tables and method are in [docs/load_test_results.md](docs/load_test_results.md).
+
+| Metric | Result |
+| --- | --- |
+| Concurrent users tested | 500 |
+| Successful checkouts | 500 |
+| Final stock | 0 (zero oversold) |
+| Checkout latency (p50 / p95 / p99) | 140ms / 780ms / 970ms |
+| Peak aggregate RPS | 204.00 |
+
 ## Why this matters
 
 Flash sales fail in a specific way. Thousands of people hit the same SKU in the same second, whether that is a concert on-sale, a Black Friday drop, or a console restock. The naive read-then-write path lets two transactions both see `stock > 0` and both succeed, so the shop sells more units than it has. Even after the write path is correct, the database still cannot absorb every concurrent checkout. Connections, lock waits, and query time pile up, and the site times out for everyone, including people who would have gotten a unit.
@@ -185,6 +195,10 @@ Figures below are from the 500-user Locust run recorded on 2026-08-26. Full tabl
 Checkout RPS in that run peaked around 16.5 req/s, which matches the admission cap of 20 per second. The 204 req/s peak is mostly status polls.
 
 Concurrency correctness (50 concurrent checkouts, stock 10) is separate: Phase 1 oversold, Phase 2 did not. See [docs/race-condition-proof.md](docs/race-condition-proof.md).
+
+## Limitations and what I would do differently
+
+A 2,000-user Locust run was also executed. Locust reported that CPU usage was too high on the local machine, status polls returned thousands of HTTP 500s, and join latency went into the multi-second range. That is a load-generator and single-laptop limit, not a measured ceiling for the checkout path, so those percentiles are not reported as results. With more time I would run the same journey on cloud VMs, with Locust workers on separate hosts from the API, until the system actually breaks. That is how you tell whether Postgres, Redis, or admission rate is the bottleneck. I would also run more than one app instance behind a load balancer. The compose file today is a single Uvicorn worker, and Redis plus `SELECT FOR UPDATE` need a real multi-instance check before claiming the design holds when horizontally scaled.
 
 ## License
 
