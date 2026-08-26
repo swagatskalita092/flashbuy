@@ -1,0 +1,29 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: flashbuy
+      POSTGRES_PASSWORD: flashbuy
+      POSTGRES_DB: flashbuy
+    ports:
+      - "5432:5432"
+    volumes:
+      - flashbuy_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flashbuy -d flashbuy"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://flashbuy:flashbuy@postgres:5432/flashbuy
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  flashbuy_pgdata:
