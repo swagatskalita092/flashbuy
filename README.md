@@ -1,27 +1,106 @@
 # FlashBuy
 
-Flash-sale checkout backend.
+FlashBuy is a flash-sale checkout backend. It sells a limited number of units under concurrent demand without overselling, by combining a Redis waiting room, row-level locks in PostgreSQL, idempotency keys, and reservation expiry.
 
-- Phase 1: naive checkout that oversells under concurrency.
-- Phase 2: row locks, idempotency keys, reservation expiry.
-- Phase 4: Prometheus metrics, Grafana, Locust journey test, recorded numbers.
+## Why this matters
 
-## Run locally
+Flash sales fail in a specific way. Thousands of people hit the same SKU in the same second, whether that is a concert on-sale, a Black Friday drop, or a console restock. The naive read-then-write path lets two transactions both see `stock > 0` and both succeed, so the shop sells more units than it has. Even after the write path is correct, the database still cannot absorb every concurrent checkout. Connections, lock waits, and query time pile up, and the site times out for everyone, including people who would have gotten a unit.
+
+That is a production infrastructure problem, not a toy race condition. Commercial virtual waiting rooms and anti-oversell systems (for example Queue-it) exist because e-commerce and ticketing sites need to drip buyers into checkout instead of opening a database transaction per visitor. FlashBuy is a small implementation of that same category of system. It is not a product competing with those vendors.
+
+## Architecture
+
+Buyer traffic goes through the waiting room before it can take a PostgreSQL row lock. Observability is a separate scrape path. It does not sit on the checkout hot path.
+
+```mermaid
+flowchart TB
+  buyer[Buyer]
+
+  subgraph api [FastAPI]
+    join["POST /waiting-room/join"]
+    status["GET /waiting-room/status/{ticket_id}"]
+    checkout["POST /checkout"]
+    confirm["POST /orders/{id}/confirm"]
+    metrics["GET /metrics"]
+  end
+
+  redis[(Redis)]
+  pg[(PostgreSQL)]
+  admit["Admission loop: every 1s, admit N=20 per product"]
+  prom[Prometheus]
+  graf[Grafana]
+
+  buyer --> join
+  join -->|"token bucket: 429 if over limit"| redis
+  redis -->|"sorted set FIFO per product_id"| admit
+  admit -->|"SET token TTL 120s"| redis
+  buyer --> status
+  status --> redis
+  status -->|"admission_token"| checkout
+  checkout -->|"403 if token missing or expired"| buyer
+  checkout -->|"SELECT FOR UPDATE + unique idempotency_key"| pg
+  checkout -->|"201 reserved, 409 out of stock"| buyer
+  checkout --> confirm
+  confirm --> pg
+  metrics --> prom
+  prom --> graf
+```
+
+What that maps to in the code:
+
+- `POST /waiting-room/join` (`app/routes/waiting_room.py`) applies a Redis token-bucket limit (5 joins per minute per `buyer_id`, 20 per IP), then `ZADD`s the ticket onto a per-product sorted set (`app/waiting_room.py`).
+- A background task in `app/main.py` sleeps `ADMISSION_TICK_SECONDS` (default 1) and calls `admit_waiting_buyers`, which pops up to `ADMISSION_BATCH_SIZE` (default 20) waiters per product and writes a short-lived admission token in Redis (default TTL 120 seconds).
+- `GET /waiting-room/status/{ticket_id}` returns live queue position, or the token once admitted.
+- `POST /checkout` requires that token unless the internal header `X-FlashBuy-Test-Bypass: 1` is set (used by pytest and `scripts/prove_race_condition.py` only). It then `SELECT ... FOR UPDATE` on the product row, rejects with 409 if stock is 0, otherwise inserts a `reserved` order with a unique `idempotency_key` and decrements stock. A replay of the same key returns the original order and does not take another unit.
+- `POST /orders/{order_id}/confirm` moves `reserved` to `confirmed`. A sweeper expires holds past `expires_at` (default 5 minutes from checkout) and returns the unit to stock.
+- `GET /metrics` is scraped by Prometheus. Grafana is provisioned to use that Prometheus datasource and load the FlashBuy flash sale dashboard.
+
+## How it was built
+
+Phase 1 shipped a working but unsafe checkout: read stock, insert an order, decrement, with no lock. The point was a real oversell bug, not a stub.
+
+Phase 2 added `scripts/prove_race_condition.py` (50 concurrent checkouts against stock 10). Against Phase 1 that run produced 50 successes and a remaining stock of 6, which is overselling. Checkout was then changed to `SELECT FOR UPDATE`, unique idempotency keys, `reserved` orders with `expires_at`, and a confirm plus expiry path. The same script then reported 10 successes and stock 0. Numbers are in `docs/race-condition-proof.md`.
+
+Phase 3 put Redis in front of checkout. The waiting room is a sorted set plus a drip-feed admission loop. Join is rate-limited with an atomic Lua token bucket so one `buyer_id` or IP cannot occupy the whole line.
+
+Phase 4 added `prometheus-client` metrics, a Prometheus scrape config, a pre-provisioned Grafana dashboard, and a Locust file that walks join, status poll, then checkout. A 2000-user Locust run was attempted. Locust reported CPU usage too high, status polls returned thousands of HTTP 500s, and join latency was dominated by that overload, so those percentiles are not used as results. The recorded run is 500 users, which is enough to exhaust stock 500 without saturating the load generator. That choice is documented in `docs/load_test_results.md`.
+
+## Tech stack
+
+From `requirements.txt` and `docker-compose.yml`:
+
+| Piece | What it is used for |
+| --- | --- |
+| FastAPI, Uvicorn | Async HTTP API |
+| Pydantic | Request and response models |
+| SQLAlchemy (async) + asyncpg | PostgreSQL access |
+| PostgreSQL 16 | Products and orders |
+| Redis 7 | Waiting-room queue, admission tokens, rate limits |
+| prometheus-client | `/metrics` |
+| Prometheus v2.55.1 | Scrape and store metrics |
+| Grafana 11.3.0 | Provisioned dashboard |
+| Locust | Journey load test |
+| pytest, pytest-asyncio, httpx | Automated tests |
+| Docker Compose | Local app, Postgres, Redis, Prometheus, Grafana, Locust |
+
+## How to run it locally
 
 ```bash
 docker-compose up --build
 ```
 
-- API: http://localhost:8000
-- Metrics: http://localhost:8000/metrics
-- Grafana: http://localhost:3000 (user `admin` / password `admin`) — dashboard **FlashBuy flash sale** under folder FlashBuy
-- Prometheus: http://localhost:9090
-- Locust UI: http://localhost:8089
-- Docs: http://localhost:8000/docs
-- Postgres: localhost:5432 (`flashbuy` / `flashbuy` / database `flashbuy`)
-- Redis: localhost:6379
+| Service | URL |
+| --- | --- |
+| API | http://localhost:8000 |
+| OpenAPI docs | http://localhost:8000/docs |
+| Prometheus metrics | http://localhost:8000/metrics |
+| Grafana | http://localhost:3000 (user `admin`, password `admin`) |
+| Prometheus UI | http://localhost:9090 |
+| Locust UI | http://localhost:8089 |
+| PostgreSQL | localhost:5432 (user `flashbuy`, password `flashbuy`, database `flashbuy`) |
+| Redis | localhost:6379 |
 
-Seed product on startup:
+On startup the app creates tables if needed and seeds one product if it is missing:
 
 | Field | Value |
 | --- | --- |
@@ -30,77 +109,83 @@ Seed product on startup:
 | stock | 500 |
 | price_cents | 1999 |
 
-## Waiting room flow (manual)
+Re-running compose does not reset that product's stock to 500.
 
-Checkout from a real client needs a short-lived **admission token**. Join the
-line, poll until admitted, then checkout. The background loop admits 20 waiters
-per product per second by default (`ADMISSION_BATCH_SIZE` / `ADMISSION_TICK_SECONDS`).
+## How to test it
+
+### Automated tests
+
+Postgres and Redis must be reachable (for example via `docker-compose up`). Then, from the repo root:
+
+```bash
+pip install -r requirements.txt
+pytest
+```
+
+### Manual buyer flow
+
+Admission is 20 tickets per product per second by default, so a single curl usually gets a token on the next status poll.
 
 ```bash
 # 1. Join the line
 curl -X POST http://localhost:8000/waiting-room/join \
   -H "Content-Type: application/json" \
   -d '{"product_id":"00000000-0000-4000-8000-000000000001","buyer_id":"buyer-1"}'
-# -> ticket_id, position
+```
 
-# 2. Poll until admitted is true (and you receive admission_token)
+The response includes `ticket_id` and `position`. Extra joins from the same `buyer_id` are limited to 5 per minute.
+
+```bash
+# 2. Poll until admitted is true and admission_token is set
 curl http://localhost:8000/waiting-room/status/TICKET_ID
+```
 
-# 3. Checkout with that token (2 minute TTL)
+```bash
+# 3. Checkout with that token (replace TOKEN)
 curl -X POST http://localhost:8000/checkout \
   -H "Content-Type: application/json" \
   -d '{"product_id":"00000000-0000-4000-8000-000000000001","buyer_id":"buyer-1","idempotency_key":"attempt-1","admission_token":"TOKEN"}'
 ```
 
-`POST /waiting-room/join` is rate-limited (token bucket): 5 joins/minute per
-`buyer_id`, 20 per IP. Excess returns **429**.
-
-Too high an admission rate slams Postgres again; too low leaves stock idle
-while the line crawls. Tune the batch size against checkout latency.
-
-Inventory tests and `scripts/prove_race_condition.py` may send
-`X-FlashBuy-Test-Bypass: 1` to skip the room. That header is **internal
-testing only**, not a customer feature.
-
-## Phase 2 behaviour (still applies)
-
-- Checkout `SELECT ... FOR UPDATE`s the product, creates a **reserved** order
-  (5 minute `expires_at`), decrements stock.
-- Duplicate `idempotency_key` returns the original order.
-- `POST /orders/{order_id}/confirm` moves `reserved` → `confirmed`.
-- A sweeper expires abandoned holds and returns stock.
-
-Race proof: [docs/race-condition-proof.md](docs/race-condition-proof.md).
+A successful checkout returns status `reserved`. Optional payment stand-in:
 
 ```bash
-python scripts/prove_race_condition.py
+curl -X POST http://localhost:8000/orders/ORDER_ID/confirm
 ```
 
-## Load test (Locust)
+### Load test
 
-This is the whole buyer journey (join → poll status ~1s → checkout with token),
-not a raw `/checkout` hammer.
+`locustfile.py` creates a new product with stock 500 at the start of each run, then each simulated user joins, polls status about once per second until admitted or 3 minutes elapse, then calls checkout with the token.
 
-Headless (what produced [docs/load_test_results.md](docs/load_test_results.md)):
+Web UI: http://localhost:8089 after `docker-compose up`.
+
+Headless command used for the recorded 500-user results:
 
 ```bash
 docker compose run --rm locust locust -f locustfile.py --host http://app:8000 \
   --headless --users 500 --spawn-rate 25 --run-time 3m
 ```
 
-Or open http://localhost:8089 after `docker compose up` and start a test there.
-Each run creates a **new** product with stock 500.
+## Results
 
-**Headline from the recorded 500-user run:** 500 successful checkouts, final
-stock **0**, zero oversell, checkout p50 **140ms** / p95 **780ms**. A 2000-user
-attempt on this laptop saturated Locust CPU and is not used for latency
-claims — details in the results doc.
+Figures below are from the 500-user Locust run recorded on 2026-08-26. Full tables, including why a 2000-user attempt was discarded, are in [docs/load_test_results.md](docs/load_test_results.md).
 
-## Tests
+| | |
+| --- | --- |
+| Simulated users | 500 (spawn 25/s, 3 minutes) |
+| Starting stock | 500 |
+| Successful checkouts (HTTP 201) | 500 |
+| Checkout failures | 0 |
+| Final stock | 0 |
+| Oversold units | 0 |
+| `POST /checkout` p50 / p95 / p99 | 140 ms / 780 ms / 970 ms |
+| `POST /waiting-room/join` p50 / p95 / p99 | 440 ms / 1300 ms / 1500 ms |
+| Peak aggregate request rate (Locust ticker) | 204.00 req/s |
 
-Postgres and Redis must be reachable (`docker-compose up`). Then:
+Checkout RPS in that run peaked around 16.5 req/s, which matches the admission cap of 20 per second. The 204 req/s peak is mostly status polls.
 
-```bash
-pip install -r requirements.txt
-pytest
-```
+Concurrency correctness (50 concurrent checkouts, stock 10) is separate: Phase 1 oversold, Phase 2 did not. See [docs/race-condition-proof.md](docs/race-condition-proof.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
