@@ -17,7 +17,20 @@ DATABASE_URL = os.getenv(
     "postgresql+asyncpg://flashbuy:flashbuy@localhost:5432/flashbuy",
 )
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    # SQLAlchemy default is pool_size=5, max_overflow=10 (15 checkouts at once).
+    # Join still hits Postgres to verify the product exists, and checkout holds
+    # a row lock until commit. 500 users spawn at 25/s with up to 20 admissions
+    # per second, so 15 connections queue or time out and FastAPI turns that
+    # into a 500. 30+50=80 stays under Postgres max_connections (we set 200 in
+    # compose). pool_timeout=10 fails fast so we can return 503 instead of hanging.
+    pool_size=int(os.getenv("DB_POOL_SIZE", "30")),
+    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "50")),
+    pool_timeout=int(os.getenv("DB_POOL_TIMEOUT", "10")),
+    pool_pre_ping=True,
+)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 

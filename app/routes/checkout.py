@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.capacity import is_transient_backend_error, service_unavailable
 from app.db import get_db
 from app.metrics import (
     checkout_latency_seconds,
@@ -115,6 +116,10 @@ async def checkout(
                 record_rejection(reason)
             elif exc.status_code == 403:
                 record_rejection("missing_or_expired_admission_token")
+            raise
+        except Exception as exc:
+            if is_transient_backend_error(exc):
+                raise service_unavailable(exc) from exc
             raise
 
 

@@ -5,6 +5,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.capacity import is_transient_backend_error, service_unavailable
 from app.db import get_db
 from app.models import Product
 from app.metrics import join_latency_seconds, observe_latency, record_rejection
@@ -38,24 +39,40 @@ async def join_waiting_room(
     Redis ZADD plus a rate-limit check so a script cannot occupy the whole line.
     """
     with observe_latency(join_latency_seconds):
-        product = await db.get(Product, payload.product_id)
-        if product is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="product not found")
+        try:
+            product = await db.get(Product, payload.product_id)
+            if product is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="product not found")
 
-        redis = await get_redis()
-        allowed, reason = await allow_waiting_room_join(redis, payload.buyer_id, client_ip(request))
-        if not allowed:
-            record_rejection("rate_limited")
-            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=reason)
+            redis = await get_redis()
+            allowed, reason = await allow_waiting_room_join(
+                redis, payload.buyer_id, client_ip(request)
+            )
+            if not allowed:
+                record_rejection("rate_limited")
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=reason
+                )
 
-        return await join_queue(redis, str(payload.product_id), payload.buyer_id)
+            return await join_queue(redis, str(payload.product_id), payload.buyer_id)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if is_transient_backend_error(exc):
+                raise service_unavailable(exc) from exc
+            raise
 
 
 @router.get("/status/{ticket_id}", response_model=WaitingRoomStatusOut)
 async def waiting_room_status(ticket_id: uuid.UUID) -> dict:
     """Poll place-in-line. Clients should not hammer this; admission is server-side."""
-    redis = await get_redis()
-    result = await get_ticket_status(redis, str(ticket_id))
+    try:
+        redis = await get_redis()
+        result = await get_ticket_status(redis, str(ticket_id))
+    except Exception as exc:
+        if is_transient_backend_error(exc):
+            raise service_unavailable(exc) from exc
+        raise
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ticket not found")
     return result

@@ -4,8 +4,11 @@ import asyncio
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+from app.capacity import is_transient_backend_error
 
 from app.db import SessionLocal, apply_schema, engine
 from app.redis_client import close_redis, get_redis
@@ -87,6 +90,19 @@ app.include_router(products_router)
 app.include_router(checkout_router)
 app.include_router(orders_router)
 app.include_router(waiting_room_router)
+
+
+@app.exception_handler(Exception)
+async def _transient_to_503(_request: Request, exc: Exception) -> JSONResponse:
+    """Turn pool/timeout errors from Depends(get_db) into 503, not a generic 500."""
+    if is_transient_backend_error(exc):
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "temporarily unavailable: connection pool exhausted or backend timeout"
+            },
+        )
+    raise exc
 
 
 @app.get("/metrics")

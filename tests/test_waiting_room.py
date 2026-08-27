@@ -137,3 +137,20 @@ async def test_rate_limit_kicks_in_after_configured_join_attempts(public_client)
             assert "buyer_id" in response.json()["detail"]
     assert statuses[:JOIN_LIMIT_PER_BUYER_PER_MINUTE] == [200] * JOIN_LIMIT_PER_BUYER_PER_MINUTE
     assert statuses[-1] == 429
+
+
+async def test_status_returns_503_when_redis_is_unavailable(public_client, monkeypatch):
+    """Pool or transport failures must be 503, not an unhandled 500."""
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    from app.routes import waiting_room as waiting_room_routes
+
+    async def boom(_redis, _ticket_id):
+        raise RedisConnectionError("Too many connections")
+
+    monkeypatch.setattr(waiting_room_routes, "get_ticket_status", boom)
+    response = await public_client.get(
+        "/waiting-room/status/00000000-0000-4000-8000-000000000099"
+    )
+    assert response.status_code == 503
+    assert "temporarily unavailable" in response.json()["detail"]

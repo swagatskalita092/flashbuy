@@ -81,3 +81,48 @@ Pushing to 2000 locust users on one box did not produce a more impressive
 flash-sale number; it produced HTTP 500s and a Locust CPU warning. A
 multi-core locust cluster and more API workers would be the next step before
 quoting 2000-user latency.
+
+## 2026-08-27: HTTP 500s on waiting-room under 500 users
+
+### Finding
+
+The original 500-user run had **4 HTTP 500s** on `GET /waiting-room/status` (0.12% of polls), clustered in short bursts. Join and checkout were otherwise clean. Those 500s were unhandled backend exceptions: FastAPI has no idea they were capacity issues, so Locust counted them as server bugs.
+
+Likely cause: Redis was created with `Redis.from_url(...)` and **no `max_connections`**, relying on redis-py’s asyncio pool default (`max_connections or 2**31`, i.e. unbounded sockets). SQLAlchemy used the library default **`pool_size=5`, `max_overflow=10`** (15 Postgres connections). Join still does a product lookup in Postgres. Under 500 concurrent status polls plus spawn-time joins, bursts of Redis/Postgres timeouts and connection errors escaped the route handlers as generic 500s.
+
+### Fix
+
+- Redis pool explicitly sized to **1024** connections (500 pollers + joins + admission + headroom), with connect/read timeouts.
+- Postgres pool **30 + overflow 50**, `pool_timeout=10`, `pool_pre_ping`, and server `max_connections=200`.
+- Transient Redis/Postgres errors on join, status, and checkout (and `Depends(get_db)` via a FastAPI handler) now return **503** with a capacity message instead of 500.
+
+### Re-test (same config, fresh volumes)
+
+`docker compose down -v`, `docker compose up --build`, then:
+
+`--users 500 --spawn-rate 25 --run-time 3m`
+
+Product `37ae10da-cffd-43fe-9355-4690bfd6d94d`, starting stock 500.
+
+| | |
+| --- | ---: |
+| Total HTTP requests | 10411 |
+| Successful checkouts (HTTP 201) | **500** |
+| Checkout failures | **0** |
+| Join requests | 500 (**0 failed**) |
+| Status polls | 9411 (**0 failed**, 0 HTTP 500, 0 HTTP 503) |
+| Final stock | **0** |
+| Oversold units | **0** |
+| Locust exit code | 0 |
+
+Latency (Locust, milliseconds):
+
+| Endpoint | p50 | p95 | p99 | avg | max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `POST /checkout` | 560 | 2600 | 4400 | 825 | 6075 |
+| `POST /waiting-room/join` | 1600 | 4700 | 5400 | 2068 | 5462 |
+| `GET /waiting-room/status` | 350 | 1300 | 1600 | 424 | 1881 |
+
+Peak aggregate RPS on the Locust ticker: **251.50**. End-of-test average over 3 minutes: **170.51 req/s**. Locust still printed a CPU-too-high warning on this laptop; that did not produce HTTP errors this time.
+
+The waiting-room **500s are gone** (0/9411 status, 0/500 join). Latency is higher than the first 500-user run on a busier machine, so the original p50/p95 in the README stay the headline correctness numbers; this entry is specifically about failure rate after the pool fix.
