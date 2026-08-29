@@ -126,3 +126,48 @@ Latency (Locust, milliseconds):
 Peak aggregate RPS on the Locust ticker: **251.50**. End-of-test average over 3 minutes: **170.51 req/s**. Locust still printed a CPU-too-high warning on this laptop; that did not produce HTTP errors this time.
 
 The waiting-room **500s are gone** (0/9411 status, 0/500 join). Latency is higher than the first 500-user run on a busier machine, so the original p50/p95 in the README stay the headline correctness numbers; this entry is specifically about failure rate after the pool fix.
+
+## 2026-08-29: "Checkout 201 but seed stock still 500"
+
+### Finding
+
+A Locust run can show 500 HTTP 201s while `SELECT stock FROM products` on the **seed** row (`00000000-0000-4000-8000-000000000001`, Flash Deal Widget) still reads **500**. That looks like a failed commit. It is not.
+
+`locustfile.py` inserts a **new** product (`Locust Flash SKU`, stock 500) at test start and only buys that id. The seed SKU is never in the waiting-room path. Querying it after the test will always show 500 unless someone checkouts that uuid.
+
+Checkout already called `await db.commit()` before 201. Session close rolls back only *uncommitted* work. `pool_pre_ping` runs when a connection is checked out, not between decrement and commit. The 503 handler can wrap Redis failures *after* a successful commit; token consume is now best-effort so that cannot turn a sold unit into 503.
+
+A first attempt to "prove" commit by requiring `SELECT stock` on a second connection to equal this request's expected remaining count was **wrong under concurrency**: the next checkout can commit first, stock is already lower, and this request returned HTTP 500 even though its order was committed (seen in an intermediate Locust run: 35 checkout 500s, Locust SKU stock still 0). The check is now "does this order id exist on a new connection?"
+
+### Fix
+
+- Explicit `rollback()` if commit raises anything other than handled `IntegrityError`.
+- After commit, confirm the order row on a second connection; do not require stock to match a per-request expected value.
+- Redis token cleanup cannot change a 201 into 503.
+- Locust prints seed stock vs load-test product id so the two rows are not mixed up.
+- Regression test: checkout then `SELECT stock FROM products` on a **new** SQLAlchemy session, assert stock decreased by 1 and one order row exists.
+
+### Re-test (2026-08-29)
+
+`pytest`: 14 passed (includes `test_checkout_commit_is_visible_on_a_new_db_connection`).
+
+`scripts/prove_race_condition.py`: 10 successes, stock 0, no oversell.
+
+Locust `--users 500 --spawn-rate 25 --run-time 3m` after rebuild:
+
+| | |
+| --- | ---: |
+| Product | `b874b467-9b09-4597-9b4d-2e0178b65228` (Locust Flash SKU) |
+| Checkout HTTP 201 | **500** (0 failures) |
+| Join / status failures | **0** |
+| Locust exit code | 0 |
+| Checkout p50 / p95 / p99 | 45 ms / 300 ms / 410 ms |
+
+Immediate `psql` (`SELECT id, name, stock FROM products`), same database, no reset in between:
+
+| id | name | stock |
+| --- | --- | ---: |
+| `00000000-0000-4000-8000-000000000001` | Flash Deal Widget (seed) | **500** |
+| `b874b467-9b09-4597-9b4d-2e0178b65228` | Locust Flash SKU | **0** |
+
+`SELECT status, count(*) FROM orders WHERE product_id = 'b874b467-...'` : **500 reserved**. Seed stock 500 is expected. Load-test stock 0 matches 500 committed checkouts.

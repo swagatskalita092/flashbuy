@@ -8,7 +8,7 @@ the named Postgres volume instead of requiring a wipe for every schema tweak.
 import os
 from collections.abc import AsyncGenerator
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -41,9 +41,30 @@ class Base(DeclarativeBase):
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """Yield one session per request so commits/rollbacks stay request-scoped."""
+    """Yield one session per request so commits/rollbacks stay request-scoped.
+
+    The session is closed (and any *uncommitted* work rolled back) when the
+    request finishes. Checkout therefore must `commit()` before it returns 201.
+    Closing the session does not undo a commit that already landed.
+    """
     async with SessionLocal() as session:
         yield session
+
+
+async def order_persisted(order_id, async_engine: AsyncEngine | None = None) -> bool:
+    """True if this order id is visible on a new connection (committed, not session-only).
+
+    We do *not* re-read stock and require it to equal this request's expected
+    remaining count. Concurrent checkouts will keep decrementing after we
+    commit, so stock can already be lower. The order row is the durable proof
+    this 201 corresponds to a committed write.
+    """
+    from app.models import Order
+
+    eng = async_engine if async_engine is not None else engine
+    async with eng.connect() as conn:
+        result = await conn.execute(select(Order.id).where(Order.id == order_id))
+        return result.scalar_one_or_none() is not None
 
 
 async def apply_schema(engine_to_use: AsyncEngine) -> None:

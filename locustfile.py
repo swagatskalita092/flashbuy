@@ -36,6 +36,10 @@ def create_load_test_product(environment, **kwargs):
     PRODUCT_ID = response.json()["id"]
     environment.product_id = PRODUCT_ID
     print(f"LOADTEST product_id={PRODUCT_ID} stock={STOCK}")
+    print(
+        "LOADTEST note: this is a NEW row, not the seed SKU "
+        "00000000-0000-4000-8000-000000000001 (that one stays at 500 unless you buy it)"
+    )
 
 
 @events.test_stop.add_listener
@@ -47,6 +51,13 @@ def report_final_stock(environment, **kwargs):
     host = environment.host.rstrip("/")
     response = requests.get(f"{host}/products/{product_id}", timeout=10)
     print(f"LOADTEST final stock={response.json().get('stock')} product_id={product_id}")
+    seed_id = "00000000-0000-4000-8000-000000000001"
+    seed = requests.get(f"{host}/products/{seed_id}", timeout=10)
+    if seed.status_code == 200:
+        print(
+            f"LOADTEST seed product stock={seed.json().get('stock')} "
+            f"id={seed_id} (unchanged unless Locust bought this id)"
+        )
 
 
 class FlashBuyer(HttpUser):

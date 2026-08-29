@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.capacity import is_transient_backend_error, service_unavailable
-from app.db import get_db
+from app.db import get_db, order_persisted
 from app.metrics import (
     checkout_latency_seconds,
     observe_latency,
@@ -128,7 +128,7 @@ async def _checkout_body(
     request: Request,
     db: AsyncSession,
 ) -> Order:
-    """Inner checkout so latency/success metrics wrap every path including errors."""
+    """Inner checkout: 201 only after COMMIT and a second connection sees the order row."""
     existing = await _get_order_by_idempotency_key(db, payload.idempotency_key)
     if existing is not None:
         return existing
@@ -174,11 +174,28 @@ async def _checkout_body(
                 detail="checkout conflict",
             )
         return replay
+    except Exception:
+        # Any other commit failure (pool, disconnect) must not become 201.
+        await db.rollback()
+        raise
+
+    # 201 only after COMMIT, and only if a second connection can see the order.
+    # Do not compare remaining stock to this request's expected value: the next
+    # buyer may already have committed a further decrement. Redis errors after
+    # this point (token cleanup) must not rewrite success as 503.
+    if not await order_persisted(order.id, db.bind):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="order did not persist after commit",
+        )
 
     await db.refresh(order)
     set_stock(str(product.id), product.stock)
     record_success()
     if payload.admission_token and not _allows_test_bypass(request):
-        redis = await get_redis()
-        await consume_admission_token(redis, payload.admission_token)
+        try:
+            redis = await get_redis()
+            await consume_admission_token(redis, payload.admission_token)
+        except Exception:
+            pass
     return order

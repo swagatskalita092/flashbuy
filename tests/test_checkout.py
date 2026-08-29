@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.models import Order
 from app.reservations import expire_reservations
@@ -44,6 +44,38 @@ async def test_successful_checkout_reduces_stock_by_one(client):
     fetched = await client.get(f"/products/{product['id']}")
     assert fetched.status_code == 200
     assert fetched.json()["stock"] == 4
+
+
+async def test_checkout_commit_is_visible_on_a_new_db_connection(client, session_factory):
+    """201 must mean Postgres actually stored stock-1, not just the ORM cache.
+
+    A second session (new connection) is what `SELECT stock FROM products`
+    in psql sees. If this ever fails, checkout returned success without commit.
+    """
+    product = await _create_product(client, stock=7)
+    product_id = product["id"]
+
+    checkout = await client.post(
+        "/checkout",
+        json={
+            "product_id": product_id,
+            "buyer_id": "commit-check",
+            "idempotency_key": unique_key(),
+        },
+    )
+    assert checkout.status_code == 201
+
+    async with session_factory() as session:
+        stock_row = await session.execute(
+            text("SELECT stock FROM products WHERE id = CAST(:id AS uuid)"),
+            {"id": product_id},
+        )
+        assert stock_row.scalar_one() == 6
+        orders_row = await session.execute(
+            text("SELECT count(*) FROM orders WHERE product_id = CAST(:id AS uuid)"),
+            {"id": product_id},
+        )
+        assert orders_row.scalar_one() == 1
 
 
 async def test_checkout_on_zero_stock_returns_409(client):
