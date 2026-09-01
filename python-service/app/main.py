@@ -18,7 +18,12 @@ from app.routes.orders import router as orders_router
 from app.routes.products import router as products_router
 from app.routes.waiting_room import router as waiting_room_router
 from app.seed import seed_default_product
-from app.waiting_room import ADMISSION_TICK_SECONDS, admit_waiting_buyers
+from app.metrics import set_outstanding_tokens
+from app.waiting_room import (
+    ADMISSION_TICK_SECONDS,
+    admit_waiting_buyers,
+    count_live_admission_tokens,
+)
 
 # How often we look for abandoned reservations. Tests call expire_reservations
 # directly so they do not wait on this interval.
@@ -53,6 +58,8 @@ async def _admission_loop() -> None:
         try:
             redis = await get_redis()
             await admit_waiting_buyers(redis)
+            # Recount every tick so TTL expiry is visible even when the queue is empty.
+            set_outstanding_tokens(await count_live_admission_tokens(redis))
         except asyncio.CancelledError:
             raise
         except Exception:

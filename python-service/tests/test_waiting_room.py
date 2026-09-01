@@ -79,6 +79,22 @@ async def test_admission_admits_buyers_over_multiple_ticks(public_client):
     assert still_waiting == 1
 
 
+async def test_count_live_admission_tokens_matches_unconsumed_grants(public_client):
+    """SCAN of wait:token:* is what the outstanding-token gauge is based on."""
+    from app.waiting_room import count_live_admission_tokens
+
+    product = await _create_product(public_client)
+    for i in range(3):
+        await public_client.post(
+            "/waiting-room/join",
+            json={"product_id": product["id"], "buyer_id": f"token-count-{i}"},
+        )
+    redis = await get_redis()
+    granted = await admit_waiting_buyers(redis, batch_size=3)
+    assert granted == 3
+    assert await count_live_admission_tokens(redis) == 3
+
+
 async def test_checkout_rejected_without_admission_token(public_client):
     """Unadmitted traffic must not take a product row lock."""
     product = await _create_product(public_client)

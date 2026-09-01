@@ -176,6 +176,16 @@ docker compose run --rm locust locust -f locustfile.py --host http://app:8000 \
   --headless --users 500 --spawn-rate 25 --run-time 3m
 ```
 
+Admission-rate times TTL stress (stock 50, delayed checkout so live tokens can pile toward 20/s × 120s = 2400). Stack must already be up; `compose run` without attaching to `python-service_default` cannot resolve host `app`:
+
+```bash
+docker compose up -d
+docker run --rm -e LOADTEST_MODE=token_stress -e PYTHONUNBUFFERED=1 \
+  --network python-service_default python-service-locust \
+  locust -f locustfile.py --host http://app:8000 \
+  --headless --users 5000 --spawn-rate 50 --run-time 10m
+```
+
 ## Results
 
 Figures below are from the 500-user Locust run recorded on 2026-08-26. Full tables, including why a 2000-user attempt was discarded, are in [docs/load_test_results.md](docs/load_test_results.md).
@@ -198,7 +208,11 @@ Concurrency correctness (50 concurrent checkouts, stock 10) is separate: Phase 1
 
 ## Limitations and what I would do differently
 
-A 2,000-user Locust run was also executed. Locust reported that CPU usage was too high on the local machine, status polls returned thousands of HTTP 500s, and join latency went into the multi-second range. That is a load-generator and single-laptop limit, not a measured ceiling for the checkout path, so those percentiles are not reported as results. With more time I would run the same journey on cloud VMs, with Locust workers on separate hosts from the API, until the system actually breaks. That is how you tell whether Postgres, Redis, or admission rate is the bottleneck. I would also run more than one app instance behind a load balancer. The compose file today is a single Uvicorn worker, and Redis plus `SELECT FOR UPDATE` need a real multi-instance check before claiming the design holds when horizontally scaled.
+A 2,000-user Locust run was also executed. Locust reported that CPU usage was too high on the local machine, status polls returned thousands of HTTP 500s, and join latency went into the multi-second range. That is a load-generator and single-laptop limit, not a measured ceiling for the checkout path, so those percentiles are not reported as results.
+
+A later `LOADTEST_MODE=token_stress` run (5000 users, stock 50, delayed checkout) was aimed at the admission-rate × TTL backlog: 20 admits/s × 120s TTL is 2400 live unused tokens in theory. Peak observed was **1840** (the original 500-user run stayed around 20–40). HTTP 500s stayed at 0; about 22k HTTP 503s landed almost entirely on `GET /waiting-room/status`. Redis 1024 connections is enough for that many token keys, not for 5000 clients polling status about once a second. Locust again warned that CPU was too high. Full table: [docs/load_test_results.md](docs/load_test_results.md).
+
+With more time I would run the same journey on cloud VMs, with Locust workers on separate hosts from the API, until the system actually breaks. That is how you tell whether Postgres, Redis, or admission rate is the bottleneck. I would also run more than one app instance behind a load balancer. The compose file today is a single Uvicorn worker, and Redis plus `SELECT FOR UPDATE` need a real multi-instance check before claiming the design holds when horizontally scaled.
 
 ## License
 

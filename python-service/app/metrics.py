@@ -50,6 +50,12 @@ waiting_room_queue_depth = Gauge(
     ["product_id"],
 )
 
+admission_tokens_outstanding = Gauge(
+    "flashbuy_admission_tokens_outstanding",
+    "Live unused admission tokens in Redis (issued, not consumed, not expired). "
+    "Theoretical ceiling is admission_rate * TTL (default 20/s * 120s = 2400).",
+)
+
 stock_remaining = Gauge(
     "flashbuy_stock_remaining",
     "Units left on the shelf. Must track successful checkouts; negative is oversell.",
@@ -81,6 +87,11 @@ def observe_latency(histogram: Histogram) -> Iterator[None]:
 def set_queue_depth(product_id: str, depth: int) -> None:
     """Push the live Redis ZCARD into Prometheus so Grafana is not one request behind."""
     waiting_room_queue_depth.labels(product_id=product_id).set(depth)
+
+
+def set_outstanding_tokens(count: int) -> None:
+    """How many valid tokens exist right now — the admission-rate * TTL backlog."""
+    admission_tokens_outstanding.set(count)
 
 
 def set_stock(product_id: str, remaining: int) -> None:

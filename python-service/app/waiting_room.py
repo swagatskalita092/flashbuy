@@ -198,3 +198,21 @@ async def peek_admission_token(redis: Redis, token: str) -> dict | None:
 async def consume_admission_token(redis: Redis, token: str) -> None:
     """Burn the token after a successful reserve so one admission cannot buy twice."""
     await redis.delete(_token_key(token))
+
+
+async def count_live_admission_tokens(redis: Redis) -> int:
+    """Count unused, unexpired tokens via SCAN (not KEYS) of wait:token:*.
+
+    This is the number of buyers who have been drip-fed into checkout but have
+    not redeemed yet. It grows toward admission_batch * TTL when the queue is
+    deep and holders wait before POSTing /checkout.
+    """
+    pattern = redis_key("wait", "token", "*")
+    counted = 0
+    cursor = 0
+    while True:
+        cursor, keys = await redis.scan(cursor=cursor, match=pattern, count=400)
+        counted += len(keys)
+        if cursor == 0:
+            break
+    return counted

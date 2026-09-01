@@ -89,8 +89,23 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "id": 6,
+      "title": "Outstanding admission tokens",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "flashbuy_admission_tokens_outstanding",
+          "legendFormat": "live tokens",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
       "id": 5,
       "title": "Successful vs rejected checkouts",
       "type": "timeseries",

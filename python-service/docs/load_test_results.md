@@ -171,3 +171,23 @@ Immediate `psql` (`SELECT id, name, stock FROM products`), same database, no res
 | `b874b467-9b09-4597-9b4d-2e0178b65228` | Locust Flash SKU | **0** |
 
 `SELECT status, count(*) FROM orders WHERE product_id = 'b874b467-...'` : **500 reserved**. Seed stock 500 is expected. Load-test stock 0 matches 500 committed checkouts.
+
+## 2026-09-01: admission-rate × TTL token backlog (`LOADTEST_MODE=token_stress`)
+
+LinkedIn-style question: 20 admits/s × 120s TTL ⇒ **2400** live unused tokens if nobody redeems. The 500-user stock-exhaust run never sat there; stock matched demand and tokens were spent in seconds (live count stayed ~20–40).
+
+This run used Locust mode `token_stress`: stock **50**, **5000** users (spawn 50/s, 10 minutes), 20% checkout within 8s of admission and 80% wait **85–115s**. Live tokens come from Prometheus `flashbuy_admission_tokens_outstanding` (Redis SCAN of `wait:token:*` every admission tick). Locust samples `/metrics` once a second.
+
+Product `3c250a7a-1d12-4612-8ad3-e510477dd66c`. Locust on the compose network (`docker run --network python-service_default`). Locust printed **CPU usage was too high** (same laptop limit as the discarded 2000-user run).
+
+| | |
+| --- | ---: |
+| Peak live unused tokens | **1840** (theoretical ceiling 2400) |
+| HTTP **500** | **0** |
+| HTTP **503** | **21977** (21975 status, 1 join, 1 checkout) |
+| Join | 5001 (1×503) |
+| Status polls | 317013 (**22576** failed: 21975×503, rest disconnects/resets) |
+| Checkout | 5053 (50×201 implied by final stock 0, **4760×409**, 140×403 expired token, 1×503, some resets) |
+| Final stock | **0** |
+
+**Pools:** Postgres 30+50 did not produce checkout 500s at this token backlog. Redis **1024** is enough for ~1840 token *keys* but not for **5000 concurrent status pollers**; those 503s are the waiting-room Redis pool saying it is full, which is the mapping we added for Bug #1. Further Redis pool growth (or fewer pollers / slower poll) would be needed before claiming 5000 browsers at 1 Hz with no 503s. This run is valid for the token-ceiling question: 1840 is far above the original ~20–40.
