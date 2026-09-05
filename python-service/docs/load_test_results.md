@@ -211,6 +211,17 @@ Same machine, same compose stack, back to back. Original 2026-09-01 polling numb
 
 SSE checkout mix: 5000 checkouts, **4900×409** (stock 50), **0** stream failures, **0** 503s. Join 5000 / 0 failed.
 
+**Did pool exhaustion go away?** For this 5000-user shape, **yes on HTTP 503s**: the command pool is no longer chewed by ~1Hz status GETs. Redis pub/sub uses a separate pool (`REDIS_PUBSUB_MAX_CONNECTIONS=6144`). The new cost is **thousands of held HTTP + SUBSCRIBE sockets** (gauge peak 3460). That is a different capacity curve, not "free." Locust's stream latency percentiles look like time-to-first-byte and are **not** used as wait-in-line time; the open-stream gauge is the concurrency signal.
+
+Command for SSE (stack already up):
+
+```bash
+docker run --rm -e LOADTEST_MODE=token_stress_sse -e PYTHONUNBUFFERED=1 \
+  --network python-service_default python-service-locust \
+  locust -f locustfile.py --host http://lb:80 \
+  --headless --users 5000 --spawn-rate 50 --run-time 10m
+```
+
 ## 2026-09-05: Phase 5A three replicas behind Caddy
 
 Goal: three FastAPI containers, Caddy round-robin on host `:8000`, Redis leader lock so admission stays 20/s (not 60/s), and a Locust 500-user stock-exhaust that still sells exactly 500.
@@ -284,13 +295,53 @@ Stream p50 was **7 ms** because many buyers connected after the leader had alrea
 
 Automated: `tests/test_admission_leader.py` runs three concurrent admit loops in one process; only one lock holder admits (40 waiters, 40 grants, one winner). Failover after TTL is a second test.
 
-**Did pool exhaustion go away?** For this 5000-user shape, **yes on HTTP 503s**: the command pool is no longer chewed by ~1Hz status GETs. Redis pub/sub uses a separate pool (`REDIS_PUBSUB_MAX_CONNECTIONS=6144`). The new cost is **thousands of held HTTP + SUBSCRIBE sockets** (gauge peak 3460). That is a different capacity curve, not "free." Locust's stream latency percentiles look like time-to-first-byte and are **not** used as wait-in-line time; the open-stream gauge is the concurrency signal.
+## 2026-09-05: Phase 5B chaos (kill one component mid Locust)
 
-Command for SSE (stack already up):
+Same laptop, three app replicas + Caddy. Each scenario is its own `--users 500 --spawn-rate 25 --run-time 2m` against `http://lb:80`. Kill at ~8s into the run (during admission), restore after ~15–20s. Locust counts Caddy **502** as failures (not mapped 503). HTTP 500 stayed **0** in every run. Reservation TTL is 5 minutes, so `products.stock` later climbs back as the sweeper expires unpaid holds; order-row counts below are from `psql` after the runs.
 
-```bash
-docker run --rm -e LOADTEST_MODE=token_stress_sse -e PYTHONUNBUFFERED=1 \
-  --network python-service_default python-service-locust \
-  locust -f locustfile.py --host http://app:8000 \
-  --headless --users 5000 --spawn-rate 50 --run-time 10m
-```
+### Finding: Caddy has no upstream health check; a dead replica is ~33% 502s
+
+After pytest dropped tables, the three apps raced `CREATE TABLE`. `app3` exited: `UniqueViolationError` on `pg_type_typname_nsp_index` (`products`). Caddy kept round-robin to it. Unintended Locust (product `19ac1a90-050b-42dc-a540-087cd24a7be9`): **1282/3852 (33.28%) HTTP 502**, 0×500, 0×503. Locust final stock **0**. `psql`: **500** orders, **500** distinct idempotency keys. Restarting `app3` after the tables existed brought it back. Compose does not `restart: unless-stopped` on app replicas.
+
+### Kill non-leader (`app2`), leader stayed `app1`
+
+Product `7028f75c-b35b-48ac-a3ee-2cae7437cfac`. `docker kill` ~8s, `docker start` ~20s later.
+
+| | |
+| --- | ---: |
+| Join | 552 (**52×502**) |
+| Status | 1741 (**310×502**) |
+| Checkout | 598 (**98×502**, rest 201) |
+| HTTP 500 / 503 | **0** / **0** |
+| Locust final stock | **0** |
+| `psql` orders / distinct keys | **500 / 500** |
+| Leader during outage | stayed **app1** |
+
+Clients saw **raw 502** (Caddy, often multi-second waits up to ~5s), not graceful 503. Sale finished; no duplicate keys. Leader lock did not move, which is the point of killing a follower.
+
+### Kill admission leader (`app1`)
+
+Product `0cab0153-b6c0-404a-9a08-bd84c2db56b0`. Health still reported `admission_leader_id=app1` for a few seconds after kill (TTL). Then empty/502 from Caddy hitting the dead replica. At **~4s** after kill, `admission_leader_id=app2`. Within the 5s lock TTL. After `docker start app1`, app1 was follower.
+
+| | |
+| --- | ---: |
+| Join | 533 (**33×502**) |
+| Status | 2430 (**356×502**) |
+| Checkout | 540 (**40×502**) |
+| HTTP 500 / 503 | **0** / **0** |
+| Locust final stock | **0** |
+| `psql` orders / distinct keys | **500 / 500** |
+
+Admission resumed on app2. No oversell, no duplicate orders. Hung-looking requests were Caddy 502 timeouts, not app hangs.
+
+### Kill Redis ~15s
+
+Product `a5fc588e-57fe-4f67-bfd8-fc85efea34ea`. Join completed (500, 0 failed) before or around the kill. Checkout **475×201, 0 failed**. Status: **441×503**, **2024×404**. Locust final stock **25**. `psql` later: stock **265** (sweeper had started releasing 5-minute holds), **475** orders, **475** distinct keys.
+
+Redis restart **dropped waiting-room tickets** (status 404). Those buyers never checked out. **25 units unsold** at Locust shutdown. Not oversell; **lost admissions**. Mapped **503** during the outage (good). After Redis was healthy, `/health` still worked; leftover queue state did not come back. This laptop did not show hung checkouts (checkout p99 160ms) because most checkouts had already happened.
+
+### Kill Postgres ~15s
+
+Product `b37caa33-4a5a-4452-a356-04cfb3227b02`. Join **56×503**, checkout **70×503**, status **0 failed** (Redis still up). Checkout **max 18049 ms** (pool wait / connect, not a clean fail-fast). Locust final stock **0**. `psql`: **500** orders, **500** keys. HTTP 500 **0**, 503 **126**. After Postgres returned healthy, remaining checkouts completed. No duplicate keys. Worst client symptom was **multi-second to ~18s** checkout/join, then 503, then recovery.
+
+Laptop caveat: these 2-minute 500-user kills ran on the same Windows Docker host as Locust. CPU was not the story; Caddy 502s and Redis/Postgres outages were.
