@@ -64,6 +64,28 @@ def _seq_key(product_id: str) -> str:
     return redis_key("wait", "seq", product_id)
 
 
+def admission_channel(ticket_id: str) -> str:
+    """Pub/sub channel for one ticket: flashbuy:admission:{ticket_id}.
+
+    Pub/sub, not another key the client polls: a GET on a key is still N
+    round trips per second from N waiters. PUBLISH wakes only the subscriber
+    for this ticket, once, when the admission loop actually grants a token.
+    """
+    return redis_key("admission", ticket_id)
+
+
+def admission_event_payload(ticket_id: str, token: str) -> str:
+    """JSON body pushed on the ticket channel and sent as one SSE data line."""
+    return json.dumps(
+        {
+            "ticket_id": ticket_id,
+            "admitted": True,
+            "admission_token": token,
+            "expires_in_seconds": ADMISSION_TOKEN_TTL_SECONDS,
+        }
+    )
+
+
 async def join_queue(redis: Redis, product_id: str, buyer_id: str) -> dict:
     """Enqueue a buyer and return ticket_id plus 1-based position.
 
@@ -179,6 +201,14 @@ async def admit_waiting_buyers(redis: Redis, batch_size: int | None = None) -> i
             )
             pipe.zrem(_queue_key(product_id), ticket_id)
             await pipe.execute()
+            # Publish after the token key exists so a subscriber who then
+            # re-reads status cannot see "not admitted". Pub/sub is fire-and-
+            # forget: if nobody is subscribed yet, the message is dropped,
+            # which is why the SSE handler re-checks status after SUBSCRIBE.
+            await redis.publish(
+                admission_channel(ticket_id),
+                admission_event_payload(ticket_id, token),
+            )
             admitted += 1
         remaining = await redis.zcard(_queue_key(product_id))
         set_queue_depth(product_id, int(remaining))

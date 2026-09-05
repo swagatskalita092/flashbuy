@@ -16,6 +16,8 @@ Headline numbers from a Locust run of 500 concurrent users against a product wit
 
 Flash sales fail in a specific way. Thousands of people hit the same SKU in the same second, whether that is a concert on-sale, a Black Friday drop, or a console restock. The naive read-then-write path lets two transactions both see `stock > 0` and both succeed, so the shop sells more units than it has. Even after the write path is correct, the database still cannot absorb every concurrent checkout. Connections, lock waits, and query time pile up, and the site times out for everyone, including people who would have gotten a unit.
 
+A waiting room that is correct but **polls** still fails at scale: 5000 clients asking "am I admitted yet?" once a second is thousands of Redis round trips that almost always say no. FlashBuy admits on a drip and **pushes** the token over SSE when that buyer's turn comes. Polling remains as a fallback for clients that cannot hold a stream.
+
 That is a production infrastructure problem, not a toy race condition. Commercial virtual waiting rooms and anti-oversell systems (for example Queue-it) exist because e-commerce and ticketing sites need to drip buyers into checkout instead of opening a database transaction per visitor. FlashBuy is a small implementation of that same category of system. It is not a product competing with those vendors.
 
 ## Architecture
@@ -28,7 +30,8 @@ flowchart TB
 
   subgraph api [FastAPI]
     join["POST /waiting-room/join"]
-    status["GET /waiting-room/status/{ticket_id}"]
+    stream["GET /waiting-room/stream/{ticket_id} SSE"]
+    status["GET /waiting-room/status/{ticket_id} fallback poll"]
     checkout["POST /checkout"]
     confirm["POST /orders/{id}/confirm"]
     metrics["GET /metrics"]
@@ -44,8 +47,12 @@ flowchart TB
   join -->|"token bucket: 429 if over limit"| redis
   redis -->|"sorted set FIFO per product_id"| admit
   admit -->|"SET token TTL 120s"| redis
-  buyer --> status
+  admit -->|"PUBLISH admission:{ticket_id}"| redis
+  buyer --> stream
+  stream -->|"SUBSCRIBE then one SSE event"| redis
+  buyer -.->|"if SSE unavailable"| status
   status --> redis
+  stream -->|"admission_token"| checkout
   status -->|"admission_token"| checkout
   checkout -->|"403 if token missing or expired"| buyer
   checkout -->|"SELECT FOR UPDATE + unique idempotency_key"| pg
@@ -59,8 +66,9 @@ flowchart TB
 What that maps to in the code:
 
 - `POST /waiting-room/join` (`app/routes/waiting_room.py`) applies a Redis token-bucket limit (5 joins per minute per `buyer_id`, 20 per IP), then `ZADD`s the ticket onto a per-product sorted set (`app/waiting_room.py`).
-- A background task in `app/main.py` sleeps `ADMISSION_TICK_SECONDS` (default 1) and calls `admit_waiting_buyers`, which pops up to `ADMISSION_BATCH_SIZE` (default 20) waiters per product and writes a short-lived admission token in Redis (default TTL 120 seconds).
-- `GET /waiting-room/status/{ticket_id}` returns live queue position, or the token once admitted.
+- A background task in `app/main.py` sleeps `ADMISSION_TICK_SECONDS` (default 1) and calls `admit_waiting_buyers`, which pops up to `ADMISSION_BATCH_SIZE` (default 20) waiters per product, writes a short-lived admission token in Redis (default TTL 120 seconds), and `PUBLISH`es on `flashbuy:admission:{ticket_id}`.
+- `GET /waiting-room/stream/{ticket_id}` is the primary wait path: SSE. It reads current status first (so a ticket already admitted is not missed), then subscribes to that ticket's channel. Heartbeats keep proxies from dropping an idle wait.
+- `GET /waiting-room/status/{ticket_id}` is the documented **fallback** for clients or networks that cannot use SSE. It still returns live queue position, or the token once admitted. It is not removed.
 - `POST /checkout` requires that token unless the internal header `X-FlashBuy-Test-Bypass: 1` is set (used by pytest and `scripts/prove_race_condition.py` only). It then `SELECT ... FOR UPDATE` on the product row, rejects with 409 if stock is 0, otherwise inserts a `reserved` order with a unique `idempotency_key` and decrements stock. A replay of the same key returns the original order and does not take another unit.
 - `POST /orders/{order_id}/confirm` moves `reserved` to `confirmed`. A sweeper expires holds past `expires_at` (default 5 minutes from checkout) and returns the unit to stock.
 - `GET /metrics` is scraped by Prometheus. Grafana is provisioned to use that Prometheus datasource and load the FlashBuy flash sale dashboard.
@@ -146,7 +154,10 @@ curl -X POST http://localhost:8000/waiting-room/join \
 The response includes `ticket_id` and `position`. Extra joins from the same `buyer_id` are limited to 5 per minute.
 
 ```bash
-# 2. Poll until admitted is true and admission_token is set
+# 2. Preferred: wait on the SSE stream until admitted (replace TICKET_ID)
+curl -N http://localhost:8000/waiting-room/stream/TICKET_ID
+
+# Fallback if SSE is blocked: poll until admitted is true and admission_token is set
 curl http://localhost:8000/waiting-room/status/TICKET_ID
 ```
 
@@ -186,6 +197,15 @@ docker run --rm -e LOADTEST_MODE=token_stress -e PYTHONUNBUFFERED=1 \
   --headless --users 5000 --spawn-rate 50 --run-time 10m
 ```
 
+Same shape over SSE instead of status polling (`LOADTEST_MODE=token_stress_sse`):
+
+```bash
+docker run --rm -e LOADTEST_MODE=token_stress_sse -e PYTHONUNBUFFERED=1 \
+  --network python-service_default python-service-locust \
+  locust -f locustfile.py --host http://app:8000 \
+  --headless --users 5000 --spawn-rate 50 --run-time 10m
+```
+
 ## Results
 
 Figures below are from the 500-user Locust run recorded on 2026-08-26. Full tables, including why a 2000-user attempt was discarded, are in [docs/load_test_results.md](docs/load_test_results.md).
@@ -210,7 +230,9 @@ Concurrency correctness (50 concurrent checkouts, stock 10) is separate: Phase 1
 
 A 2,000-user Locust run was also executed. Locust reported that CPU usage was too high on the local machine, status polls returned thousands of HTTP 500s, and join latency went into the multi-second range. That is a load-generator and single-laptop limit, not a measured ceiling for the checkout path, so those percentiles are not reported as results.
 
-A later `LOADTEST_MODE=token_stress` run (5000 users, stock 50, delayed checkout) was aimed at the admission-rate × TTL backlog: 20 admits/s × 120s TTL is 2400 live unused tokens in theory. Peak observed was **1840** (the original 500-user run stayed around 20–40). HTTP 500s stayed at 0; about 22k HTTP 503s landed almost entirely on `GET /waiting-room/status`. Redis 1024 connections is enough for that many token keys, not for 5000 clients polling status about once a second. Locust again warned that CPU was too high. Full table: [docs/load_test_results.md](docs/load_test_results.md).
+A later `LOADTEST_MODE=token_stress` run (5000 users, stock 50, delayed checkout) was aimed at the admission-rate × TTL backlog: 20 admits/s × 120s TTL is 2400 live unused tokens in theory. Peak observed on 2026-09-01 was **1840** (the original 500-user run stayed around 20–40). HTTP 500s stayed at 0; about 22k HTTP 503s landed almost entirely on `GET /waiting-room/status`. Redis 1024 connections is enough for that many token keys, not for 5000 clients polling status about once a second. Locust warned that CPU was too high.
+
+Replacing that poll with SSE (`LOADTEST_MODE=token_stress_sse`) on 2026-09-05, same 5000-user shape, produced **0 HTTP 503s** and **0 HTTP 500s**, peak live tokens **2160**, and **3460** concurrent open streams. Command-pool exhaustion from 1Hz polls is gone. The new bill is thousands of held HTTP and Redis SUBSCRIBE connections, plus a dedicated pub/sub pool of 6144. Locust did not print the CPU-too-high warning on the SSE run; it did on the polling re-run that same day (peak tokens 1899, 21221×503). Full table: [docs/load_test_results.md](docs/load_test_results.md).
 
 With more time I would run the same journey on cloud VMs, with Locust workers on separate hosts from the API, until the system actually breaks. That is how you tell whether Postgres, Redis, or admission rate is the bottleneck. I would also run more than one app instance behind a load balancer. The compose file today is a single Uvicorn worker, and Redis plus `SELECT FOR UPDATE` need a real multi-instance check before claiming the design holds when horizontally scaled.
 

@@ -1,5 +1,8 @@
 """Waiting room, drip-feed admission, checkout gate, and join rate limits."""
 
+import asyncio
+import json
+
 import pytest
 
 from app.rate_limit import JOIN_LIMIT_PER_BUYER_PER_MINUTE
@@ -153,6 +156,71 @@ async def test_rate_limit_kicks_in_after_configured_join_attempts(public_client)
             assert "buyer_id" in response.json()["detail"]
     assert statuses[:JOIN_LIMIT_PER_BUYER_PER_MINUTE] == [200] * JOIN_LIMIT_PER_BUYER_PER_MINUTE
     assert statuses[-1] == 429
+
+
+async def test_stream_emits_immediately_when_already_admitted(public_client):
+    """Admit first, then open SSE: must get the token without waiting for PUBLISH.
+
+    Redis pub/sub does not replay. This is the race the stream handler checks
+    with get_ticket_status before it subscribes.
+    """
+    product = await _create_product(public_client)
+    join = await public_client.post(
+        "/waiting-room/join",
+        json={"product_id": product["id"], "buyer_id": "already-in"},
+    )
+    ticket_id = join.json()["ticket_id"]
+    redis = await get_redis()
+    await admit_waiting_buyers(redis, batch_size=1)
+
+    chunks = []
+    async with public_client.stream(
+        "GET", f"/waiting-room/stream/{ticket_id}", timeout=5.0
+    ) as response:
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers.get("content-type", "")
+        async for text in response.aiter_text():
+            chunks.append(text)
+            if "admission_token" in "".join(chunks):
+                break
+    body = "".join(chunks)
+    assert "event: admission" in body
+    data_line = next(line for line in body.splitlines() if line.startswith("data:"))
+    payload = json.loads(data_line.removeprefix("data:").strip())
+    assert payload["admitted"] is True
+    assert payload["admission_token"]
+    status = await public_client.get(f"/waiting-room/status/{ticket_id}")
+    assert status.json()["admission_token"] == payload["admission_token"]
+
+
+async def test_stream_receives_admission_via_pubsub(public_client):
+    """Subscribe first, then admit: the event must arrive from PUBLISH."""
+    product = await _create_product(public_client)
+    join = await public_client.post(
+        "/waiting-room/join",
+        json={"product_id": product["id"], "buyer_id": "live-push"},
+    )
+    ticket_id = join.json()["ticket_id"]
+
+    async def read_event() -> dict:
+        async with public_client.stream(
+            "GET", f"/waiting-room/stream/{ticket_id}", timeout=8.0
+        ) as response:
+            assert response.status_code == 200
+            async for line in response.aiter_lines():
+                if line.startswith("data:"):
+                    return json.loads(line.removeprefix("data:").strip())
+        raise AssertionError("stream closed without an admission event")
+
+    reader = asyncio.create_task(read_event())
+    await asyncio.sleep(0.4)
+    redis = await get_redis()
+    assert await admit_waiting_buyers(redis, batch_size=1) == 1
+    payload = await asyncio.wait_for(reader, timeout=6)
+    assert payload["admitted"] is True
+    assert payload["admission_token"]
+    status = await public_client.get(f"/waiting-room/status/{ticket_id}")
+    assert status.json()["admission_token"] == payload["admission_token"]
 
 
 async def test_status_returns_503_when_redis_is_unavailable(public_client, monkeypatch):

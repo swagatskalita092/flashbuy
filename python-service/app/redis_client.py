@@ -35,7 +35,15 @@ KEY_PREFIX = os.getenv("REDIS_KEY_PREFIX", "flashbuy:")
 #   OS-level EMFILE. 1024 is well under Redis maxclients (default 10000).
 REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNECTIONS", "1024"))
 
+# SSE holds one Redis pub/sub connection for as long as the buyer waits
+# (minutes), not milliseconds. The command pool above stays at 1024 so join,
+# status polling, and rate limits still fail-fast. This pool is sized for
+# thousands of open streams; socket_timeout is None because a subscribed
+# connection is idle until admission and a 5s timeout would drop it.
+REDIS_PUBSUB_MAX_CONNECTIONS = int(os.getenv("REDIS_PUBSUB_MAX_CONNECTIONS", "6144"))
+
 _redis: Redis | None = None
+_pubsub_redis: Redis | None = None
 
 
 def redis_key(*parts: str) -> str:
@@ -57,9 +65,26 @@ async def get_redis() -> Redis:
     return _redis
 
 
+async def get_pubsub_redis() -> Redis:
+    """Separate pool for long-lived SUBSCRIBE sockets used by SSE streams."""
+    global _pubsub_redis
+    if _pubsub_redis is None:
+        _pubsub_redis = Redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            max_connections=REDIS_PUBSUB_MAX_CONNECTIONS,
+            socket_connect_timeout=2,
+            socket_timeout=None,
+        )
+    return _pubsub_redis
+
+
 async def close_redis() -> None:
     """Drop the pool on shutdown so Docker stop does not hang on open clients."""
-    global _redis
+    global _redis, _pubsub_redis
     if _redis is not None:
         await _redis.aclose()
         _redis = None
+    if _pubsub_redis is not None:
+        await _pubsub_redis.aclose()
+        _pubsub_redis = None

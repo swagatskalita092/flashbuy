@@ -56,6 +56,11 @@ admission_tokens_outstanding = Gauge(
     "Theoretical ceiling is admission_rate * TTL (default 20/s * 120s = 2400).",
 )
 
+sse_connections_open = Gauge(
+    "flashbuy_sse_connections_open",
+    "Currently open GET /waiting-room/stream connections waiting for admission.",
+)
+
 stock_remaining = Gauge(
     "flashbuy_stock_remaining",
     "Units left on the shelf. Must track successful checkouts; negative is oversell.",
@@ -92,6 +97,16 @@ def set_queue_depth(product_id: str, depth: int) -> None:
 def set_outstanding_tokens(count: int) -> None:
     """How many valid tokens exist right now — the admission-rate * TTL backlog."""
     admission_tokens_outstanding.set(count)
+
+
+def sse_connection_opened() -> None:
+    """One more browser (or Locust user) holding an SSE stream."""
+    sse_connections_open.inc()
+
+
+def sse_connection_closed() -> None:
+    """Stream ended: admitted, client gone, or error. Always paired with opened()."""
+    sse_connections_open.dec()
 
 
 def set_stock(product_id: str, remaining: int) -> None:

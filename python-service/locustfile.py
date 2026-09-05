@@ -15,6 +15,7 @@ token count is sampled from GET /metrics (flashbuy_admission_tokens_outstanding)
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import re
@@ -25,9 +26,11 @@ import gevent
 import requests
 from locust import HttpUser, between, events, task
 
-# stock_exhaust: original journey. token_stress: backlog of live tokens.
+# stock_exhaust: original journey. token_stress: poll for status.
+# token_stress_sse: same backlog shape, wait on GET /waiting-room/stream.
 LOADTEST_MODE = os.getenv("LOADTEST_MODE", "stock_exhaust")
-TOKEN_STRESS = LOADTEST_MODE == "token_stress"
+TOKEN_STRESS = LOADTEST_MODE in ("token_stress", "token_stress_sse")
+USE_SSE = LOADTEST_MODE == "token_stress_sse"
 
 STOCK = 50 if TOKEN_STRESS else 500
 ADMISSION_TIMEOUT_SECONDS = 900 if TOKEN_STRESS else 180
@@ -37,8 +40,13 @@ _TOKEN_GAUGE = re.compile(
     r"^flashbuy_admission_tokens_outstanding(?:\{[^}]*\})?\s+(\d+(?:\.\d+)?)\s*$",
     re.M,
 )
+_SSE_GAUGE = re.compile(
+    r"^flashbuy_sse_connections_open(?:\{[^}]*\})?\s+(\d+(?:\.\d+)?)\s*$",
+    re.M,
+)
 
 _peak_tokens = 0
+_peak_sse = 0
 _http_500 = 0
 _http_503 = 0
 _stop_sampler = False
@@ -58,7 +66,7 @@ def _count_capacity_statuses(response=None, **kwargs):
 
 
 def _sample_outstanding_tokens(host: str) -> None:
-    global _peak_tokens, _stop_sampler
+    global _peak_tokens, _peak_sse, _stop_sampler
     while not _stop_sampler:
         try:
             text = requests.get(f"{host}/metrics", timeout=3).text
@@ -67,6 +75,11 @@ def _sample_outstanding_tokens(host: str) -> None:
                 value = int(float(match.group(1)))
                 if value > _peak_tokens:
                     _peak_tokens = value
+            sse_match = _SSE_GAUGE.search(text)
+            if sse_match:
+                sse_value = int(float(sse_match.group(1)))
+                if sse_value > _peak_sse:
+                    _peak_sse = sse_value
         except Exception:
             pass
         gevent.sleep(1.0)
@@ -75,13 +88,18 @@ def _sample_outstanding_tokens(host: str) -> None:
 @events.test_start.add_listener
 def create_load_test_product(environment, **kwargs):
     """Fresh SKU so leftover Phase 1/2 orders cannot skew the run."""
-    global PRODUCT_ID, _peak_tokens, _http_500, _http_503, _stop_sampler
+    global PRODUCT_ID, _peak_tokens, _peak_sse, _http_500, _http_503, _stop_sampler
     _peak_tokens = 0
+    _peak_sse = 0
     _http_500 = 0
     _http_503 = 0
     _stop_sampler = False
     host = environment.host.rstrip("/")
-    name = "Locust Token Stress SKU" if TOKEN_STRESS else "Locust Flash SKU"
+    name = "Locust Token Stress SKU"
+    if LOADTEST_MODE == "token_stress_sse":
+        name = "Locust Token Stress SSE SKU"
+    elif not TOKEN_STRESS:
+        name = "Locust Flash SKU"
     response = None
     last_error = None
     for _attempt in range(30):
@@ -137,6 +155,7 @@ def report_final_stock(environment, **kwargs):
         f"(ceiling 20*120=2400; original 500-user run stayed ~20-40)"
     )
     print(f"LOADTEST http_500={_http_500} http_503={_http_503}")
+    print(f"LOADTEST peak_open_sse_connections={_peak_sse}")
     if TOKEN_STRESS and _peak_tokens < 200:
         print(
             "LOADTEST WARNING: peak token count did not leave the original ~20-40 "
@@ -182,7 +201,10 @@ class FlashBuyer(HttpUser):
             self._join()
             return
         if self.phase == "poll":
-            self._poll()
+            if USE_SSE:
+                self._wait_sse()
+            else:
+                self._poll()
             return
         if self.phase == "hold":
             if time.time() < self.checkout_at:
@@ -220,6 +242,59 @@ class FlashBuyer(HttpUser):
         if not body.get("admitted") or not body.get("admission_token"):
             return
         self.admission_token = body["admission_token"]
+        if TOKEN_STRESS:
+            self.checkout_at = time.time() + _checkout_delay_seconds()
+            self.phase = "hold"
+            return
+        self._checkout()
+
+    def _wait_sse(self):
+        """Block this greenlet on GET /waiting-room/stream until admission.
+
+        Locust's default HttpUser client is request/response. SSE is a held-open
+        body, so this uses stream=True (same requests session Locust already has)
+        and parses `data:` lines. One long request replaces ~1Hz status polls.
+        """
+        if time.time() > self.join_deadline:
+            self.phase = "idle"
+            return
+        remaining = max(1.0, self.join_deadline - time.time())
+        with self.client.get(
+            f"/waiting-room/stream/{self.ticket_id}",
+            name="/waiting-room/stream",
+            headers={**self.headers, "Accept": "text/event-stream"},
+            stream=True,
+            timeout=remaining,
+            catch_response=True,
+        ) as response:
+            if response.status_code != 200:
+                response.failure(f"sse status {response.status_code}")
+                if response.status_code == 503:
+                    return
+                self.phase = "idle"
+                return
+            token = None
+            try:
+                for raw in response.iter_lines(decode_unicode=True):
+                    if time.time() > self.join_deadline:
+                        break
+                    if not raw:
+                        continue
+                    if raw.startswith("data:"):
+                        payload = json.loads(raw[5:].strip())
+                        if payload.get("admitted") and payload.get("admission_token"):
+                            token = payload["admission_token"]
+                            break
+            except Exception as exc:
+                response.failure(str(exc))
+                self.phase = "idle"
+                return
+            if not token:
+                response.failure("sse closed without admission")
+                self.phase = "idle"
+                return
+            response.success()
+        self.admission_token = token
         if TOKEN_STRESS:
             self.checkout_at = time.time() + _checkout_delay_seconds()
             self.phase = "hold"

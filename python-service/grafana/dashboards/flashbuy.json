@@ -104,8 +104,23 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "id": 7,
+      "title": "Open SSE admission streams",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "flashbuy_sse_connections_open",
+          "legendFormat": "open streams",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 32 },
       "id": 5,
       "title": "Successful vs rejected checkouts",
       "type": "timeseries",

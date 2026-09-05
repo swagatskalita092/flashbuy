@@ -191,3 +191,33 @@ Product `3c250a7a-1d12-4612-8ad3-e510477dd66c`. Locust on the compose network (`
 | Final stock | **0** |
 
 **Pools:** Postgres 30+50 did not produce checkout 500s at this token backlog. Redis **1024** is enough for ~1840 token *keys* but not for **5000 concurrent status pollers**; those 503s are the waiting-room Redis pool saying it is full, which is the mapping we added for Bug #1. Further Redis pool growth (or fewer pollers / slower poll) would be needed before claiming 5000 browsers at 1 Hz with no 503s. This run is valid for the token-ceiling question: 1840 is far above the original ~20–40.
+
+## 2026-09-05: polling vs SSE at 5000 users (Finding #3 follow-up)
+
+Same machine, same compose stack, back to back. Original 2026-09-01 polling numbers above are **not** edited.
+
+`GET /waiting-room/stream/{ticket_id}` is SSE: check status, subscribe to `flashbuy:admission:{ticket_id}`, re-check so a grant between those two steps is not lost, then wait for PUBLISH. Polling `GET /waiting-room/status/{ticket_id}` is unchanged.
+
+### Side by side (5000 users, stock 50, spawn 50/s, 10 minutes)
+
+| | Polling (2026-09-01, committed) | Polling (2026-09-05, this machine) | SSE `token_stress_sse` (2026-09-05) |
+| --- | ---: | ---: | ---: |
+| Peak live unused tokens | **1840** | **1899** | **2160** |
+| HTTP 500 | **0** | **0** | **0** |
+| HTTP 503 | **21977** | **21221** (21218 status, 3 checkout) | **0** |
+| Peak open SSE streams | n/a | 0 | **3460** |
+| Locust CPU-too-high warning | yes | yes | **not printed** |
+| Final stock | 0 | 0 | 0 |
+
+SSE checkout mix: 5000 checkouts, **4900×409** (stock 50), **0** stream failures, **0** 503s. Join 5000 / 0 failed.
+
+**Did pool exhaustion go away?** For this 5000-user shape, **yes on HTTP 503s**: the command pool is no longer chewed by ~1Hz status GETs. Redis pub/sub uses a separate pool (`REDIS_PUBSUB_MAX_CONNECTIONS=6144`). The new cost is **thousands of held HTTP + SUBSCRIBE sockets** (gauge peak 3460). That is a different capacity curve, not "free." Locust's stream latency percentiles look like time-to-first-byte and are **not** used as wait-in-line time; the open-stream gauge is the concurrency signal.
+
+Command for SSE (stack already up):
+
+```bash
+docker run --rm -e LOADTEST_MODE=token_stress_sse -e PYTHONUNBUFFERED=1 \
+  --network python-service_default python-service-locust \
+  locust -f locustfile.py --host http://app:8000 \
+  --headless --users 5000 --spawn-rate 50 --run-time 10m
+```
