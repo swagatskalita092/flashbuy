@@ -25,37 +25,37 @@ That is a production infrastructure problem, not a toy race condition. Commercia
 Buyer traffic goes through the waiting room before it can take a PostgreSQL row lock. Observability is a separate scrape path. It does not sit on the checkout hot path.
 
 ```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 70, "rankSpacing": 110, "curve": "linear"}}}%%
 flowchart TB
   buyer[Buyer]
 
   subgraph api [FastAPI]
     join["POST /waiting-room/join"]
-    stream["GET /waiting-room/stream/{ticket_id} SSE"]
-    status["GET /waiting-room/status/{ticket_id} fallback poll"]
+    stream["GET /waiting-room/stream/ticket_id (SSE)"]
+    status["GET /waiting-room/status/ticket_id (fallback poll)"]
     checkout["POST /checkout"]
-    confirm["POST /orders/{id}/confirm"]
+    confirm["POST /orders/id/confirm"]
     metrics["GET /metrics"]
   end
 
   redis[(Redis)]
   pg[(PostgreSQL)]
-  admit["Admission loop: every 1s, admit N=20 per product"]
+  admit["Admission loop: every 1s, admit N=20/product"]
   prom[Prometheus]
   graf[Grafana]
 
   buyer --> join
-  join -->|"token bucket: 429 if over limit"| redis
-  redis -->|"sorted set FIFO per product_id"| admit
-  admit -->|"SET token TTL 120s"| redis
-  admit -->|"PUBLISH admission:{ticket_id}"| redis
+  join -->|"429 if over rate limit"| redis
+  redis -->|"FIFO queue per product"| admit
+  admit -->|"grant token, TTL 120s, then publish"| redis
   buyer --> stream
-  stream -->|"SUBSCRIBE then one SSE event"| redis
+  stream -->|"subscribe, push one event"| redis
   buyer -.->|"if SSE unavailable"| status
-  status --> redis
+  status -->|"read status"| redis
   stream -->|"admission_token"| checkout
   status -->|"admission_token"| checkout
-  checkout -->|"403 if token missing or expired"| buyer
-  checkout -->|"SELECT FOR UPDATE + unique idempotency_key"| pg
+  checkout -->|"403 if token missing/expired"| buyer
+  checkout -->|"row lock + idempotency key"| pg
   checkout -->|"201 reserved, 409 out of stock"| buyer
   checkout --> confirm
   confirm --> pg
