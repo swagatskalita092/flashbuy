@@ -146,6 +146,7 @@ async def test_duplicate_idempotency_key_does_not_create_second_order(client):
         "idempotency_key": key,
     }
     first = await client.post("/checkout", json=body)
+    # Client timed out after the server committed, then retried the same key.
     second = await client.post("/checkout", json=body)
     assert first.status_code == 201
     assert second.status_code == 201
@@ -182,6 +183,39 @@ async def test_expired_reservation_releases_stock(client, session_factory):
 
     confirm = await client.post(f"/orders/{order_id}/confirm")
     assert confirm.status_code == 409
+
+
+async def test_stock_stays_held_if_expiry_sweep_does_not_run(client, session_factory):
+    """If the background sweeper is dead, expired-at holds do not free themselves.
+
+    Clock-expired rows stay `reserved` until expire_reservations runs again
+    (process restart). Units are not stuck forever after that restart.
+    """
+    product = await _create_product(client, stock=1)
+    checkout = await client.post(
+        "/checkout",
+        json={
+            "product_id": product["id"],
+            "buyer_id": "buyer-stuck",
+            "idempotency_key": unique_key(),
+        },
+    )
+    assert checkout.status_code == 201
+    order_id = checkout.json()["id"]
+    async with session_factory() as session:
+        result = await session.execute(select(Order).where(Order.id == order_id))
+        order = result.scalar_one()
+        order.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        await session.commit()
+
+    assert (await client.get(f"/products/{product['id']}")).json()["stock"] == 0
+    async with session_factory() as session:
+        result = await session.execute(select(Order).where(Order.id == order_id))
+        assert result.scalar_one().status == "reserved"
+
+    async with session_factory() as session:
+        assert await expire_reservations(session) == 1
+    assert (await client.get(f"/products/{product['id']}")).json()["stock"] == 1
 
 
 async def test_confirm_reserved_order(client):
