@@ -1,0 +1,18 @@
+:80 {
+	# Round-robin across the three FastAPI replicas. flush_interval -1 keeps
+	# SSE (text/event-stream) from being buffered until the stream ends.
+	reverse_proxy app1:8000 app2:8000 app3:8000 {
+		lb_policy round_robin
+		flush_interval -1
+		# Locust (and browsers behind other proxies) send X-Forwarded-For so the
+		# join IP limiter can treat buyers as distinct. Caddy's default is to
+		# prepend the immediate TCP peer, which made every Locust user look like
+		# one Docker IP and 429'd 474/500 joins on the first 3-replica run.
+		header_up X-Forwarded-For {http.request.header.X-Forwarded-For}
+		transport http {
+			read_timeout 15m
+			write_timeout 15m
+			dial_timeout 5s
+		}
+	}
+}

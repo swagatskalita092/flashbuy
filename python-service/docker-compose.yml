@@ -29,19 +29,47 @@ services:
       timeout: 5s
       retries: 20
 
-  app:
+  app1: &app
     build: .
-    ports:
-      - "8000:8000"
-    environment:
+    hostname: app1
+    environment: &app_env
       DATABASE_URL: postgresql+asyncpg://flashbuy:flashbuy@postgres:5432/flashbuy
       REDIS_URL: redis://redis:6379/0
-      REDIS_PUBSUB_MAX_CONNECTIONS: "6144"
+      REDIS_PUBSUB_MAX_CONNECTIONS: "2048"
+      DB_POOL_SIZE: "15"
+      DB_MAX_OVERFLOW: "20"
+      INSTANCE_ID: app1
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  app2:
+    <<: *app
+    hostname: app2
+    environment:
+      <<: *app_env
+      INSTANCE_ID: app2
+
+  app3:
+    <<: *app
+    hostname: app3
+    environment:
+      <<: *app_env
+      INSTANCE_ID: app3
+
+  lb:
+    image: caddy:2-alpine
+    ports:
+      - "8000:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - app1
+      - app2
+      - app3
+    restart: on-failure
 
   prometheus:
     image: prom/prometheus:v2.55.1
@@ -53,7 +81,9 @@ services:
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
     depends_on:
-      - app
+      - app1
+      - app2
+      - app3
 
   grafana:
     image: grafana/grafana:11.3.0
@@ -71,11 +101,11 @@ services:
 
   locust:
     build: .
-    command: locust -f locustfile.py --host http://app:8000
+    command: locust -f locustfile.py --host http://lb:80
     ports:
       - "8089:8089"
     depends_on:
-      - app
+      - lb
     ulimits:
       nofile:
         soft: 65536

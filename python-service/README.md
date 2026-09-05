@@ -99,7 +99,7 @@ From `requirements.txt` and `docker-compose.yml`:
 | Grafana 11.3.0 | Provisioned dashboard |
 | Locust | Journey load test |
 | pytest, pytest-asyncio, httpx | Automated tests |
-| Docker Compose | Local app, Postgres, Redis, Prometheus, Grafana, Locust |
+| Docker Compose | Three app replicas, Caddy load balancer, Postgres, Redis, Prometheus, Grafana, Locust |
 
 ## How to run it locally
 
@@ -118,7 +118,7 @@ docker-compose up --build
 | PostgreSQL | localhost:5432 (user `flashbuy`, password `flashbuy`, database `flashbuy`) |
 | Redis | localhost:6379 |
 
-On startup the app creates tables if needed and seeds one product if it is missing:
+On startup each app replica creates tables if needed and seeds one product if it is missing. Caddy listens on host port 8000 and round-robins to `app1`, `app2`, and `app3`. Only one replica runs the waiting-room admission loop (Redis `SET NX` lock, 5s TTL). Without that lock, three replicas would admit 60 buyers/s instead of 20.
 
 | Field | Value |
 | --- | --- |
@@ -183,7 +183,7 @@ Web UI: http://localhost:8089 after `docker-compose up`.
 Headless command used for the recorded 500-user results:
 
 ```bash
-docker compose run --rm locust locust -f locustfile.py --host http://app:8000 \
+docker compose run --rm locust locust -f locustfile.py --host http://lb:80 \
   --headless --users 500 --spawn-rate 25 --run-time 3m
 ```
 
@@ -193,7 +193,7 @@ Admission-rate times TTL stress (stock 50, delayed checkout so live tokens can p
 docker compose up -d
 docker run --rm -e LOADTEST_MODE=token_stress -e PYTHONUNBUFFERED=1 \
   --network python-service_default python-service-locust \
-  locust -f locustfile.py --host http://app:8000 \
+  locust -f locustfile.py --host http://lb:80 \
   --headless --users 5000 --spawn-rate 50 --run-time 10m
 ```
 
@@ -202,7 +202,7 @@ Same shape over SSE instead of status polling (`LOADTEST_MODE=token_stress_sse`)
 ```bash
 docker run --rm -e LOADTEST_MODE=token_stress_sse -e PYTHONUNBUFFERED=1 \
   --network python-service_default python-service-locust \
-  locust -f locustfile.py --host http://app:8000 \
+  locust -f locustfile.py --host http://lb:80 \
   --headless --users 5000 --spawn-rate 50 --run-time 10m
 ```
 
@@ -234,7 +234,7 @@ A later `LOADTEST_MODE=token_stress` run (5000 users, stock 50, delayed checkout
 
 Replacing that poll with SSE (`LOADTEST_MODE=token_stress_sse`) on 2026-09-05, same 5000-user shape, produced **0 HTTP 503s** and **0 HTTP 500s**, peak live tokens **2160**, and **3460** concurrent open streams. Command-pool exhaustion from 1Hz polls is gone. The new bill is thousands of held HTTP and Redis SUBSCRIBE connections, plus a dedicated pub/sub pool of 6144. Locust did not print the CPU-too-high warning on the SSE run; it did on the polling re-run that same day (peak tokens 1899, 21221×503). Full table: [docs/load_test_results.md](docs/load_test_results.md).
 
-With more time I would run the same journey on cloud VMs, with Locust workers on separate hosts from the API, until the system actually breaks. That is how you tell whether Postgres, Redis, or admission rate is the bottleneck. I would also run more than one app instance behind a load balancer. The compose file today is a single Uvicorn worker, and Redis plus `SELECT FOR UPDATE` need a real multi-instance check before claiming the design holds when horizontally scaled.
+With more time I would run the same journey on cloud VMs, with Locust workers on separate hosts from the API, until the system actually breaks. That is how you tell whether Postgres, Redis, or admission rate is the bottleneck. Compose now runs three app replicas behind Caddy; Redis leader election keeps admission at 20/s. Multi-instance Locust numbers are in [docs/load_test_results.md](docs/load_test_results.md).
 
 ## License
 

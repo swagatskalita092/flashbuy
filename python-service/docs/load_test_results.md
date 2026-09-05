@@ -211,6 +211,79 @@ Same machine, same compose stack, back to back. Original 2026-09-01 polling numb
 
 SSE checkout mix: 5000 checkouts, **4900×409** (stock 50), **0** stream failures, **0** 503s. Join 5000 / 0 failed.
 
+## 2026-09-05: Phase 5A three replicas behind Caddy
+
+Goal: three FastAPI containers, Caddy round-robin on host `:8000`, Redis leader lock so admission stays 20/s (not 60/s), and a Locust 500-user stock-exhaust that still sells exactly 500.
+
+### Wiring notes (observed, not assumed)
+
+Nginx `upstream app1:8000` **exited on boot**: `host not found in upstream` because Compose started nginx before Docker DNS had `app1`. Switched to Caddy 2 (`Caddyfile`), which resolves backends at request time. `/health` then rotated `instance_id` app2 → app3 → app1, with **one** `admission_leader: true` (app3 at that moment).
+
+Per-replica DB pools were cut to **15+20** so 3×80 does not exceed Postgres `max_connections=200`. Prometheus scrapes `app1/app2/app3` separately. Locust samples `/metrics` through the load balancer, so token/SSE gauges are whatever replica it hit that second (leader-only token recount). Treat those peaks as lower bounds, not a cluster sum.
+
+### Finding: Caddy ate Locust's `X-Forwarded-For`
+
+First 500-user run against `http://lb:80`, **before** the header fix. Product `0de6831c-a50a-4aad-beb4-ed38c5b429be`.
+
+| | |
+| --- | ---: |
+| Join | 500 (**474× HTTP 429**) |
+| Checkout HTTP 201 | **26** |
+| Status | 26 (0 failed) |
+| HTTP 500 / 503 | **0** |
+| Final stock | **474** |
+| Peak live tokens (LB `/metrics`) | **20** |
+| Locust exit | 1 |
+
+Caddy prepended the Locust container IP, so `client_ip()` (first `X-Forwarded-For` hop) saw one address. Join is 20/IP/minute. Locust idles on 429, so those buyers never entered the queue. **This is not oversell and not a 3× admission bug.** Peak tokens stayed 20 (a 3× drip would still have been starved of joiners). After the finding, Caddy `header_up X-Forwarded-For` passes Locust's per-user header through.
+
+### Re-test: polling 500 users (after XFF fix)
+
+`--users 500 --spawn-rate 25 --run-time 3m`, `--host http://lb:80`. Product `46aec72b-9430-46b3-b442-96d56039824e`.
+
+| | |
+| --- | ---: |
+| Total HTTP requests | 2997 |
+| Join | 500 (**0 failed**) |
+| Status polls | 1997 (**0 failed**) |
+| Checkout HTTP 201 | **500** |
+| Checkout failures | **0** |
+| HTTP 500 / 503 | **0** |
+| Final stock | **0** |
+| Oversold | **0** |
+| Peak live tokens (LB `/metrics`) | **22** |
+| Peak checkout RPS on Locust ticker | **19.80** (would be ~60 if all three replicas admitted) |
+| Locust exit | 0 |
+
+Latency (ms):
+
+| Endpoint | p50 | p95 | p99 |
+| --- | ---: | ---: | ---: |
+| `POST /checkout` | 25 | 120 | 180 |
+| `POST /waiting-room/join` | 62 | 160 | 240 |
+| `GET /waiting-room/status` | 6 | 57 | 87 |
+
+500 checkouts completed while users were still spawning (~20s spawn + a few seconds). That matches one 20/s valve, not three.
+
+### Re-test: SSE 500 users through the same balancer
+
+`LOADTEST_MODE=stock_exhaust_sse`, same 500/25/3m, product `90cc6755-ecd7-4a34-be61-e425c4435945`. Join, stream, and checkout each go through Caddy, so they routinely land on different replicas than the admission leader.
+
+| | |
+| --- | ---: |
+| Join / stream / checkout | **500 / 500 / 500**, **0 failed** |
+| HTTP 500 / 503 | **0** |
+| Final stock | **0** |
+| Oversold | **0** |
+| Peak checkout RPS | **18.30** |
+| Peak live tokens (LB `/metrics`) | **20** |
+| Peak open SSE (LB `/metrics`) | **47** (per-replica gauge; not a cluster sum) |
+| Locust exit | 0 |
+
+Stream p50 was **7 ms** because many buyers connected after the leader had already granted; the stream handler's already-admitted check returns immediately. That is the cross-instance case working, not a broken wait.
+
+Automated: `tests/test_admission_leader.py` runs three concurrent admit loops in one process; only one lock holder admits (40 waiters, 40 grants, one winner). Failover after TTL is a second test.
+
 **Did pool exhaustion go away?** For this 5000-user shape, **yes on HTTP 503s**: the command pool is no longer chewed by ~1Hz status GETs. Redis pub/sub uses a separate pool (`REDIS_PUBSUB_MAX_CONNECTIONS=6144`). The new cost is **thousands of held HTTP + SUBSCRIBE sockets** (gauge peak 3460). That is a different capacity curve, not "free." Locust's stream latency percentiles look like time-to-first-byte and are **not** used as wait-in-line time; the open-stream gauge is the concurrency signal.
 
 Command for SSE (stack already up):

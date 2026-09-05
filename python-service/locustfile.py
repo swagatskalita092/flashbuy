@@ -30,7 +30,7 @@ from locust import HttpUser, between, events, task
 # token_stress_sse: same backlog shape, wait on GET /waiting-room/stream.
 LOADTEST_MODE = os.getenv("LOADTEST_MODE", "stock_exhaust")
 TOKEN_STRESS = LOADTEST_MODE in ("token_stress", "token_stress_sse")
-USE_SSE = LOADTEST_MODE == "token_stress_sse"
+USE_SSE = LOADTEST_MODE in ("token_stress_sse", "stock_exhaust_sse")
 
 STOCK = 50 if TOKEN_STRESS else 500
 ADMISSION_TIMEOUT_SECONDS = 900 if TOKEN_STRESS else 180
@@ -98,6 +98,8 @@ def create_load_test_product(environment, **kwargs):
     name = "Locust Token Stress SKU"
     if LOADTEST_MODE == "token_stress_sse":
         name = "Locust Token Stress SSE SKU"
+    elif LOADTEST_MODE == "stock_exhaust_sse":
+        name = "Locust Flash SSE SKU"
     elif not TOKEN_STRESS:
         name = "Locust Flash SKU"
     response = None

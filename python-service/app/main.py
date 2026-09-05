@@ -18,6 +18,11 @@ from app.routes.orders import router as orders_router
 from app.routes.products import router as products_router
 from app.routes.waiting_room import router as waiting_room_router
 from app.seed import seed_default_product
+from app.admission_leader import (
+    INSTANCE_ID,
+    current_admission_leader,
+    hold_admission_leadership,
+)
 from app.metrics import set_outstanding_tokens
 from app.waiting_room import (
     ADMISSION_TICK_SECONDS,
@@ -48,7 +53,7 @@ async def _reservation_sweep_loop() -> None:
 
 
 async def _admission_loop() -> None:
-    """Drip-feed the waiting room every tick.
+    """Drip-feed the waiting room every tick, but only on the elected leader.
 
     Sleep-then-work (not work-then-sleep) so a slow Redis does not overlap
     ticks. Failures skip a beat instead of crashing uvicorn.
@@ -57,6 +62,8 @@ async def _admission_loop() -> None:
         await asyncio.sleep(ADMISSION_TICK_SECONDS)
         try:
             redis = await get_redis()
+            if not await hold_admission_leadership(redis):
+                continue
             await admit_waiting_buyers(redis)
             # Recount every tick so TTL expiry is visible even when the queue is empty.
             set_outstanding_tokens(await count_live_admission_tokens(redis))
@@ -119,6 +126,15 @@ def metrics() -> Response:
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    """Liveness probe used by local scripts before firing load."""
-    return {"status": "ok"}
+async def health() -> dict[str, str | bool]:
+    """Liveness plus who currently owns the admission lock (if Redis is up)."""
+    payload: dict[str, str | bool] = {"status": "ok", "instance_id": INSTANCE_ID}
+    try:
+        redis = await get_redis()
+        leader = await current_admission_leader(redis)
+        payload["admission_leader"] = leader == INSTANCE_ID
+        if leader is not None:
+            payload["admission_leader_id"] = leader
+    except Exception:
+        payload["admission_leader"] = False
+    return payload
