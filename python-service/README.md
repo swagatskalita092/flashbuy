@@ -22,51 +22,80 @@ That is a production infrastructure problem, not a toy race condition. Commercia
 
 ## Architecture
 
-Buyer traffic goes through the waiting room before it can take a PostgreSQL row lock. Observability is a separate scrape path. It does not sit on the checkout hot path.
+Buyer traffic goes through the waiting room before it can take a PostgreSQL row lock. Caddy load-balances across three FastAPI replicas. Only one replica's admission loop is ever active at a time, enforced by a Redis leader-election lock, so replicas cannot multiply the admission rate. Observability is a separate scrape path. It does not sit on the checkout hot path.
 
 ```mermaid
-%%{init: {"flowchart": {"nodeSpacing": 70, "rankSpacing": 110, "curve": "linear"}}}%%
+%%{init: {"flowchart": {"nodeSpacing": 80, "rankSpacing": 100, "curve": "linear"}}}%%
 flowchart TB
   buyer[Buyer]
+  caddy[Caddy load balancer]
 
-  subgraph api [FastAPI]
-    join["POST /waiting-room/join"]
-    stream["GET /waiting-room/stream/ticket_id (SSE)"]
-    status["GET /waiting-room/status/ticket_id (fallback poll)"]
-    checkout["POST /checkout"]
-    confirm["POST /orders/id/confirm"]
-    metrics["GET /metrics"]
+  buyer --> caddy
+
+  subgraph replicas [FastAPI replicas]
+    direction LR
+    subgraph r1 [FastAPI replica 1]
+      j1["POST /waiting-room/join"]
+      c1["POST /checkout"]
+    end
+    subgraph r2 [FastAPI replica 2]
+      j2["POST /waiting-room/join"]
+      c2["POST /checkout"]
+    end
+    subgraph r3 [FastAPI replica 3]
+      j3["POST /waiting-room/join"]
+      c3["POST /checkout"]
+    end
   end
 
+  caddy --> j1
+  caddy --> c1
+  caddy --> j2
+  caddy --> c2
+  caddy --> j3
+  caddy --> c3
+
   redis[(Redis)]
+  lock["Leader lock: SET NX, 5s TTL"]
+  admit["Admission loop leader only: every 1s, admit N=20/product"]
   pg[(PostgreSQL)]
-  admit["Admission loop: every 1s, admit N=20/product"]
   prom[Prometheus]
   graf[Grafana]
 
-  buyer --> join
-  join -->|"429 if over rate limit"| redis
+  j1 -->|"429 if over rate limit"| redis
+  j2 -->|"429 if over rate limit"| redis
+  j3 -->|"429 if over rate limit"| redis
+
+  r1 -->|"try acquire"| lock
+  r2 -->|"try acquire"| lock
+  r3 -->|"try acquire"| lock
+  lock --> redis
+
   redis -->|"FIFO queue per product"| admit
+  lock -->|"only the current leader runs"| admit
   admit -->|"grant token, TTL 120s, then publish"| redis
-  buyer --> stream
-  stream -->|"subscribe, push one event"| redis
-  buyer -.->|"if SSE unavailable"| status
-  status -->|"read status"| redis
-  stream -->|"admission_token"| checkout
-  status -->|"admission_token"| checkout
-  checkout -->|"403 if token missing/expired"| buyer
-  checkout -->|"row lock + idempotency key"| pg
-  checkout -->|"201 reserved, 409 out of stock"| buyer
-  checkout --> confirm
-  confirm --> pg
-  metrics --> prom
+
+  c1 -->|"row lock + idempotency key"| pg
+  c2 -->|"row lock + idempotency key"| pg
+  c3 -->|"row lock + idempotency key"| pg
+
+  c1 -->|"201 reserved, 409 out of stock"| buyer
+  c2 -->|"201 reserved, 409 out of stock"| buyer
+  c3 -->|"201 reserved, 409 out of stock"| buyer
+
+  prom -.->|"scrape /metrics on each replica"| r1
+  prom -.-> r2
+  prom -.-> r3
   prom --> graf
 ```
+
+All three replicas run the same admission-loop code, but only one is ever active. Each replica tries to acquire a Redis lock (`SET NX` with a 5-second TTL) on startup and on every tick; whichever replica holds the lock runs the admission loop that tick, and the others stand by. If the leader crashes or stops renewing the lock, another replica acquires it once the TTL expires (observed failover time in testing: ~4 seconds). This is what stops three replicas from tripling the real admission rate to 60 buyers/sec instead of the intended 20.
 
 What that maps to in the code:
 
 - `POST /waiting-room/join` (`app/routes/waiting_room.py`) applies a Redis token-bucket limit (5 joins per minute per `buyer_id`, 20 per IP), then `ZADD`s the ticket onto a per-product sorted set (`app/waiting_room.py`).
 - A background task in `app/main.py` sleeps `ADMISSION_TICK_SECONDS` (default 1) and calls `admit_waiting_buyers`, which pops up to `ADMISSION_BATCH_SIZE` (default 20) waiters per product, writes a short-lived admission token in Redis (default TTL 120 seconds), and `PUBLISH`es on `flashbuy:admission:{ticket_id}`.
+- Leader election lives in `app/admission_leader.py`. It uses a Redis `SET key value NX EX 5` to claim leadership, renews the lock while it holds it, and only runs `admit_waiting_buyers` when it currently holds the lock. `test_admission_leader.py` verifies both that three concurrent loops only ever admit at one replica's rate, and that a new leader takes over after the old one stops renewing.
 - `GET /waiting-room/stream/{ticket_id}` is the primary wait path: SSE. It reads current status first (so a ticket already admitted is not missed), then subscribes to that ticket's channel. Heartbeats keep proxies from dropping an idle wait.
 - `GET /waiting-room/status/{ticket_id}` is the documented **fallback** for clients or networks that cannot use SSE. It still returns live queue position, or the token once admitted. It is not removed.
 - `POST /checkout` requires that token unless the internal header `X-FlashBuy-Test-Bypass: 1` is set (used by pytest and `scripts/prove_race_condition.py` only). It then `SELECT ... FOR UPDATE` on the product row, rejects with 409 if stock is 0, otherwise inserts a `reserved` order with a unique `idempotency_key` and decrements stock. A replay of the same key returns the original order and does not take another unit.
