@@ -20,6 +20,8 @@ A waiting room that is correct but **polls** still fails at scale: 5000 clients 
 
 That is a production infrastructure problem, not a toy race condition. Commercial virtual waiting rooms and anti-oversell systems (for example Queue-it) exist because e-commerce and ticketing sites need to drip buyers into checkout instead of opening a database transaction per visitor. FlashBuy is a small implementation of that same category of system. It is not a product competing with those vendors.
 
+For the full phase-by-phase build history — every bug found, every load test run, and the reasoning behind what was and wasn't added — see [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md).
+
 ## Architecture
 
 Buyer traffic goes through the waiting room before it can take a PostgreSQL row lock. Caddy load-balances across three FastAPI replicas. Only one replica's admission loop is ever active at a time, enforced by a Redis leader-election lock, so replicas cannot multiply the admission rate. Observability is a separate scrape path. It does not sit on the checkout hot path.
