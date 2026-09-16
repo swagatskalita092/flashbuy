@@ -75,7 +75,9 @@ once: 500 reservations, stock 0, no oversell in either run. Checkout p95
 stayed under **780ms** with 500 concurrent simulated buyers polling about
 once a second. Admission (~20/s) is what bounds checkout RPS, which is the
 point of Phase 3 — Locust’s 204 req/s peak is mostly cheap status polls, not
-204 database checkouts.
+204 database checkouts. Do not compare 204.00 to later checkout-only or
+SSE-era rates. The figure that stays in the same 16–20 band across dates
+is peak checkout RPS; see [reproducibility.md](reproducibility.md).
 
 Pushing to 2000 locust users on one box did not produce a more impressive
 flash-sale number; it produced HTTP 500s and a Locust CPU warning. A

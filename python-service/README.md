@@ -10,7 +10,7 @@ Headline numbers from a Locust run of 500 concurrent users against a product wit
 | Successful checkouts | 500 |
 | Final stock | 0 (zero oversold) |
 | Checkout latency (p50 / p95 / p99) | 140ms / 780ms / 970ms |
-| Peak aggregate RPS | 204.00 |
+| Peak checkout RPS | 16-20 (waiting-room admission cap) |
 
 ## Why this matters
 
@@ -251,9 +251,9 @@ Figures below are from the 500-user Locust run recorded on 2026-08-26. Full tabl
 | Oversold units | 0 |
 | `POST /checkout` p50 / p95 / p99 | 140 ms / 780 ms / 970 ms |
 | `POST /waiting-room/join` p50 / p95 / p99 | 440 ms / 1300 ms / 1500 ms |
-| Peak aggregate request rate (Locust ticker) | 204.00 req/s |
+| Peak checkout RPS | ~16.5 (admission cap 20/s) |
 
-Checkout RPS in that run peaked around 16.5 req/s, which matches the admission cap of 20 per second. The 204 req/s peak is mostly status polls.
+That day's Locust ticker also peaked at 204.00 aggregate req/s. That figure is mostly status polls, not checkout throughput.
 
 Concurrency correctness (50 concurrent checkouts, stock 10) is separate: Phase 1 oversold, Phase 2 did not. See [docs/race-condition-proof.md](docs/race-condition-proof.md).
 

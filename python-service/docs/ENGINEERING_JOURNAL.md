@@ -131,7 +131,7 @@ The load test does not merely hammer the checkout endpoint. It simulates the ful
 
 Spawn rate 25/s, 3-minute run, against a product seeded with 500 units of stock.
 
-Results: 500 successful checkouts, final stock exactly 0. Checkout latency: p50 140ms, p95 780ms, p99 970ms. Peak aggregate throughput: 204.00 requests/second. Of the status polls, 4 (0.12%) returned HTTP 500 — a number that, at the time, was accepted as noise, but which later investigation (Bug #1, below) traced to a real and fixable cause rather than genuine noise.
+Results: 500 successful checkouts, final stock exactly 0. Checkout latency: p50 140ms, p95 780ms, p99 970ms. Peak aggregate throughput: 204.00 requests/second. That 204.00 figure is Locust's combined request rate, mostly 1 Hz status polls (3259 of 4259 requests that day), not checkout throughput. Checkout itself peaked around 16.5 req/s, in line with the 20/s admission cap. It should not be compared to later checkout-only or SSE-era rates; the stable figure across dates is checkout RPS in the 16-20 range (see [reproducibility.md](reproducibility.md)). Of the status polls, 4 (0.12%) returned HTTP 500 — a number that, at the time, was accepted as noise, but which later investigation (Bug #1, below) traced to a real and fixable cause rather than genuine noise.
 
 4.5 The discarded 2,000-user run
 
