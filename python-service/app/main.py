@@ -20,6 +20,7 @@ from app.routes.waiting_room import router as waiting_room_router
 from app.seed import seed_default_product
 from app.admission_leader import (
     INSTANCE_ID,
+    current_admission_epoch,
     current_admission_leader,
     hold_admission_leadership,
 )
@@ -57,15 +58,24 @@ async def _admission_loop() -> None:
 
     Sleep-then-work (not work-then-sleep) so a slow Redis does not overlap
     ticks. Failures skip a beat instead of crashing uvicorn.
+
+    Every call into admit_waiting_buyers carries the fencing epoch from
+    this tick's leadership check, never a cached one from an earlier tick.
+    That is what protects against a frozen-then-resumed process: its old
+    epoch will be rejected by the write itself, even if this loop still
+    believes it is leader.
     """
     while True:
         await asyncio.sleep(ADMISSION_TICK_SECONDS)
         try:
             redis = await get_redis()
-            if not await hold_admission_leadership(redis):
+            leadership = await hold_admission_leadership(redis)
+            if not leadership.is_leader:
                 continue
-            await admit_waiting_buyers(redis)
-            # Recount every tick so TTL expiry is visible even when the queue is empty.
+            result = await admit_waiting_buyers(redis, epoch=leadership.epoch)
+            if result == -1:
+                print(f"admission rejected: stale epoch {leadership.epoch}, no longer current leader")
+                continue
             set_outstanding_tokens(await count_live_admission_tokens(redis))
         except asyncio.CancelledError:
             raise
@@ -126,15 +136,18 @@ def metrics() -> Response:
 
 
 @app.get("/health")
-async def health() -> dict[str, str | bool]:
+async def health() -> dict[str, str | bool | int]:
     """Liveness plus who currently owns the admission lock (if Redis is up)."""
-    payload: dict[str, str | bool] = {"status": "ok", "instance_id": INSTANCE_ID}
+    payload: dict[str, str | bool | int] = {"status": "ok", "instance_id": INSTANCE_ID}
     try:
         redis = await get_redis()
         leader = await current_admission_leader(redis)
         payload["admission_leader"] = leader == INSTANCE_ID
         if leader is not None:
             payload["admission_leader_id"] = leader
+        epoch = await current_admission_epoch(redis)
+        if epoch is not None:
+            payload["admission_epoch"] = epoch
     except Exception:
         payload["admission_leader"] = False
     return payload

@@ -29,3 +29,19 @@ Redis pub/sub does not replay. If the buyer is admitted while disconnected, wait
 Verified in `test_stream_emits_immediately_when_already_admitted`: admit first (PUBLISH with nobody listening), then open the stream; the body contains `event: admission` and the same token as `GET /waiting-room/status`. `test_stream_receives_admission_via_pubsub` is the live-subscriber path.
 
 The 500-user `stock_exhaust_sse` Locust run through Caddy (Phase 5A) had stream p50 **7 ms** and 500/500 checkouts: many streams opened after the leader had already granted, on a **different replica** than join. That is this reconnect check under load, not a hang.
+
+## 4. Frozen-then-resumed admission leader (fencing token)
+
+Found by outside feedback (Edilec on LinkedIn), not by Phase 5B. Those drills only `docker kill` / `docker stop`. They never freeze a process longer than the 5s lease and then let it continue (`kill -STOP`, GC pause, frozen VM).
+
+**What was wrong:** `_admission_loop` did `hold_admission_leadership` then, in a later Redis round trip, `admit_waiting_buyers`. A freeze between those two calls lets the lease expire and another replica take over. On resume the first process still ran admit because its check had already returned true. Two writers in one window.
+
+A lease cannot close that. Check-then-act across two network calls is not atomic.
+
+**Fix:** a fencing epoch on `flashbuy:admission:leader_epoch`. The counter increments only on a fresh lock acquire, not on renew. `admit_waiting_buyers` takes that epoch and re-reads it inside the same Lua script that pops the queue and writes tokens. A stale epoch returns **-1** (empty queue still returns **0**). The admission loop logs `admission rejected: stale epoch ...` on -1.
+
+**What was actually proven:** `test_stale_fencing_epoch_is_rejected_after_a_simulated_freeze` is the direct stale-write proof: A takes an epoch, the lease is deleted, B admits on a new epoch, A retries with the old epoch and must get **-1**. That test failed (`assert 5 == 0`, later `-1`) when the Lua check was removed, then passed with it restored.
+
+A live Locust 500-user `docker pause` of `python-service-app3-1` confirmed **no split-brain in leadership state**: `/health` moved from app3 / epoch 1 to app2 / epoch 2, and after resume app3 reported `admission_leader: false`. Orders: stock 0, **500** rows, **500** distinct idempotency keys. It did **not** prove a stale admit was refused on app3: uvicorn never logged the loop, and returning 0 used to look the same as an empty queue. The -1 return plus the log line are what make the next pause drill able to show a reject in `docker logs`.
+
+**Separate operational gap from the same drill, not fixed here:** Caddy has no short upstream timeout. Requests that landed on the frozen replica sat until unpause (checkout/status p99 ~90s). Documented, not patched in this change. Script: `scripts/chaos_pause_leader.sh`.

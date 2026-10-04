@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from app.admission_leader import hold_admission_leadership
 from app.rate_limit import JOIN_LIMIT_PER_BUYER_PER_MINUTE
 from app.redis_client import get_redis
 from app.waiting_room import admit_waiting_buyers
@@ -21,6 +22,12 @@ async def _create_product(client, stock: int = 10):
     )
     assert response.status_code == 201
     return response.json()
+
+
+async def _admit(redis, batch_size: int) -> int:
+    leadership = await hold_admission_leadership(redis, "waiting-room-test", ttl_seconds=30)
+    assert leadership.is_leader and leadership.epoch is not None
+    return await admit_waiting_buyers(redis, batch_size=batch_size, epoch=leadership.epoch)
 
 
 async def test_join_assigns_increasing_positions(public_client):
@@ -52,7 +59,7 @@ async def test_admission_admits_buyers_over_multiple_ticks(public_client):
         tickets.append(response.json()["ticket_id"])
 
     redis = await get_redis()
-    first = await admit_waiting_buyers(redis, batch_size=2)
+    first = await _admit(redis, batch_size=2)
     assert first == 2
     admitted_after_one = []
     waiting_after_one = []
@@ -68,7 +75,7 @@ async def test_admission_admits_buyers_over_multiple_ticks(public_client):
     assert len(admitted_after_one) == 2
     assert len(waiting_after_one) == 3
 
-    second = await admit_waiting_buyers(redis, batch_size=2)
+    second = await _admit(redis, batch_size=2)
     assert second == 2
     still_waiting = 0
     admitted = 0
@@ -93,7 +100,7 @@ async def test_count_live_admission_tokens_matches_unconsumed_grants(public_clie
             json={"product_id": product["id"], "buyer_id": f"token-count-{i}"},
         )
     redis = await get_redis()
-    granted = await admit_waiting_buyers(redis, batch_size=3)
+    granted = await _admit(redis, batch_size=3)
     assert granted == 3
     assert await count_live_admission_tokens(redis) == 3
 
@@ -123,7 +130,7 @@ async def test_checkout_succeeds_with_admission_token(public_client):
     )
     ticket_id = join.json()["ticket_id"]
     redis = await get_redis()
-    await admit_waiting_buyers(redis, batch_size=1)
+    await _admit(redis, batch_size=1)
     status = await public_client.get(f"/waiting-room/status/{ticket_id}")
     token = status.json()["admission_token"]
     assert token
@@ -171,7 +178,7 @@ async def test_stream_emits_immediately_when_already_admitted(public_client):
     )
     ticket_id = join.json()["ticket_id"]
     redis = await get_redis()
-    await admit_waiting_buyers(redis, batch_size=1)
+    await _admit(redis, batch_size=1)
 
     chunks = []
     async with public_client.stream(
@@ -215,7 +222,7 @@ async def test_stream_receives_admission_via_pubsub(public_client):
     reader = asyncio.create_task(read_event())
     await asyncio.sleep(0.4)
     redis = await get_redis()
-    assert await admit_waiting_buyers(redis, batch_size=1) == 1
+    assert await _admit(redis, batch_size=1) == 1
     payload = await asyncio.wait_for(reader, timeout=6)
     assert payload["admitted"] is True
     assert payload["admission_token"]

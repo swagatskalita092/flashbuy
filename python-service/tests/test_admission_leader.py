@@ -29,8 +29,11 @@ async def _loop(
 ) -> None:
     redis = await get_redis()
     while not stop.is_set():
-        if await hold_admission_leadership(redis, instance_id, ttl_seconds=ttl):
-            admitted[instance_id] += await admit_waiting_buyers(redis, batch_size=5)
+        leadership = await hold_admission_leadership(redis, instance_id, ttl_seconds=ttl)
+        if leadership.is_leader:
+            admitted[instance_id] += await admit_waiting_buyers(
+                redis, batch_size=5, epoch=leadership.epoch
+            )
         await asyncio.sleep(0.05)
 
 
@@ -82,12 +85,70 @@ async def test_admission_leadership_moves_after_lock_expires(public_client):
     await redis.delete(leader_lock_key())
     ttl = 1
 
-    assert await hold_admission_leadership(redis, "old-leader", ttl_seconds=ttl)
-    first = await admit_waiting_buyers(redis, batch_size=3)
+    old = await hold_admission_leadership(redis, "old-leader", ttl_seconds=ttl)
+    assert old.is_leader
+    first = await admit_waiting_buyers(redis, batch_size=3, epoch=old.epoch)
     assert first == 3
-    assert not await hold_admission_leadership(redis, "challenger", ttl_seconds=ttl)
+    challenger_blocked = await hold_admission_leadership(
+        redis, "challenger", ttl_seconds=ttl
+    )
+    assert not challenger_blocked.is_leader
 
     await asyncio.sleep(ttl + 0.3)
-    assert await hold_admission_leadership(redis, "challenger", ttl_seconds=ttl)
-    second = await admit_waiting_buyers(redis, batch_size=3)
+    challenger = await hold_admission_leadership(redis, "challenger", ttl_seconds=ttl)
+    assert challenger.is_leader
+    second = await admit_waiting_buyers(redis, batch_size=3, epoch=challenger.epoch)
     assert second == 3
+
+
+async def test_stale_fencing_epoch_is_rejected_after_a_simulated_freeze(public_client):
+    """Reproduces the gap a real kill -STOP/-CONT drill would hit, without
+    the timing flakiness of an actual OS-level pause.
+
+    Sequence: instance A acquires leadership and gets epoch 1, exactly as
+    if it had just finished its leadership check for this tick, the moment
+    right before it would normally call admit_waiting_buyers. We then
+    simulate A freezing by deleting its lease directly (standing in for the
+    TTL expiring while A is stopped), let instance B take over and get
+    epoch 2, and have B admit. Only then do we let A "wake up" and attempt
+    to admit using its old, stale epoch 1. That attempt must be rejected,
+    and the live queue must show exactly what B admitted, nothing doubled.
+    """
+    product = await public_client.post(
+        "/products",
+        json={"name": "Fencing Widget", "stock": 20, "price_cents": 100},
+    )
+    product_id = product.json()["id"]
+    await _join_many(public_client, product_id, 10)
+
+    redis = await get_redis()
+    await redis.delete(leader_lock_key())
+
+    # A acquires leadership normally and gets its epoch, exactly like the
+    # real admission loop does right before calling admit_waiting_buyers.
+    a_result = await hold_admission_leadership(redis, "instance-a", ttl_seconds=5)
+    assert a_result.is_leader
+    stale_epoch = a_result.epoch
+
+    # Simulate A freezing here: its lease expires without it ever calling
+    # admit_waiting_buyers with stale_epoch. We force this directly instead
+    # of sleeping past a real TTL, so the test is fast and not flaky.
+    await redis.delete(leader_lock_key())
+
+    # B takes over for real, gets a new epoch, and admits.
+    b_result = await hold_admission_leadership(redis, "instance-b", ttl_seconds=5)
+    assert b_result.is_leader
+    assert b_result.epoch != stale_epoch
+    admitted_by_b = await admit_waiting_buyers(redis, batch_size=5, epoch=b_result.epoch)
+    assert admitted_by_b > 0
+
+    # A "wakes up" now and tries to use the epoch it fetched before freezing.
+    # This is the exact bug: without fencing, this call would succeed and
+    # double-admit. With fencing, it must be refused.
+    admitted_by_stale_a = await admit_waiting_buyers(
+        redis, batch_size=5, epoch=stale_epoch
+    )
+    assert admitted_by_stale_a == -1
+
+    live = await count_live_admission_tokens(redis)
+    assert live == admitted_by_b

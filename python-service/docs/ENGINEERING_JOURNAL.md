@@ -14,6 +14,7 @@ Finding #3 — The Admission-Rate × TTL Backlog
 Finding #3 Follow-Up — Replacing Polling with SSE
 Phase 5 — Multi-Instance, Chaos Testing, and Failure Modes
 Phase 5.5 — Documentation Consistency Pass
+Finding #4 — Frozen Leader and Fencing Tokens
 The Two-Language Expansion
 Future Work — Phase 6 (Not Yet Implemented)
 Engineering Principles Applied Throughout
@@ -312,6 +313,20 @@ An incidental environment issue, correctly triaged
 Running the existing test suite after this documentation change initially produced 20 connection-refused errors across the board. Rather than assume the documentation edit had somehow broken something (a README change touching no application code, which should have been an implausible cause on its face), a systematic check was run: the test configuration's connection strings were confirmed correct (localhost, matching the Compose port mappings, not a Docker-internal service name), a possible duplicate tests/ directory was ruled out, and Docker's own port-publishing state was inspected directly — which revealed the actual cause: Docker Desktop reported the Postgres and Redis containers as "healthy," but had not actually bound their ports to the host, a known glitch that can occur after a Docker Desktop restart while old containers remain "up." Recreating the two services (docker compose up -d --force-recreate postgres redis) restored the port bindings, and the full 20-test suite then passed cleanly. This is recorded here as an example of correctly separating "did my change cause this" from "is something else going on," rather than reflexively reverting or re-litigating a correct documentation change because of an unrelated environment hiccup.
 
 Commit: b4ef57c. Verified directly against a fresh clone of origin/main — diagram, prose, and code bullet all confirmed present exactly as intended.
+
+<a name="finding-4"></a>
+
+Finding #4 — Frozen Leader and Fencing Tokens
+
+Question asked: what happens if the admission leader does not die, but freezes longer than its Redis lease and then wakes up?
+
+Limitation of what we had already tested: Phase 5B only kills processes. `docker kill` / `docker stop` never leave a process that already passed `hold_admission_leadership` and still has `admit_waiting_buyers` left to run. A GC pause, `kill -STOP`, or a frozen VM is that case. The lease check and the queue write were two Redis round trips. After a freeze in between, another replica can take the lock; the resumed process still admits with a stale "I am leader" answer. Two drip-feeds in one window, which is the 3x-rate failure Phase 5A existed to prevent. A lease alone cannot survive that, because check-then-act across two Redis calls is never atomic.
+
+How it was found: outside feedback (Edilec on LinkedIn), not an internal chaos run. Same class of story as Finding #3: the gap was real in the code, and the existing tests did not cover it.
+
+Fix: a fencing epoch (`INCR` of `flashbuy:admission:leader_epoch` only on a new acquire, never on renew). Every admit Lua GET of that key must match the epoch from this tick's leadership result, in the same script as ZRANGE/SET/HSET/ZREM. Stale epoch returns **-1** (empty queue returns 0). The loop logs `admission rejected: stale epoch ...` so a live freeze is visible in `docker logs`.
+
+Verification: `test_stale_fencing_epoch_is_rejected_after_a_simulated_freeze` deletes A's lease (stand-in for TTL while frozen), lets B admit on a new epoch, then A calls admit with the old epoch and must get -1. The test was confirmed to fail when the Lua epoch check is removed (`assert 5 == 0`), then pass with the check restored. Live `docker pause` of the Locust-era leader confirmed leadership transfer (app3/epoch 1 → app2/epoch 2, 500 orders / 500 keys, no split-brain on `/health`). Direct stale-write rejection is proven by that unit test and the -1/log signal, not by a line in the live drill's app3 logs. The same drill also showed Caddy holding requests on the frozen replica for most of a minute; that timeout gap is recorded, not fixed here.
 
 <a name="two-language"></a>
 

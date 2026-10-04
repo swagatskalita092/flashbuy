@@ -31,8 +31,9 @@ import uuid
 
 from redis.asyncio import Redis
 
-from app.redis_client import redis_key
+from app.admission_leader import leader_epoch_key
 from app.metrics import set_queue_depth
+from app.redis_client import KEY_PREFIX, redis_key
 
 ADMISSION_BATCH_SIZE = int(os.getenv("ADMISSION_BATCH_SIZE", "20"))
 ADMISSION_TOKEN_TTL_SECONDS = int(os.getenv("ADMISSION_TOKEN_TTL_SECONDS", "120"))
@@ -168,53 +169,105 @@ async def get_ticket_status(redis: Redis, ticket_id: str) -> dict | None:
     }
 
 
-async def admit_waiting_buyers(redis: Redis, batch_size: int | None = None) -> int:
+# KEYS[1] = fencing epoch key
+# ARGV[1] = epoch this caller believes is current
+# ARGV[2] = batch size per product
+# ARGV[3] = admission token TTL seconds
+# ARGV[4] = Redis key prefix (flashbuy:)
+#
+# The GET of the epoch and every ZRANGE/SET/HSET/ZREM/PUBLISH happen in this
+# one script. A Python-level "if epoch matches: then admit" would recreate
+# the freeze-between-check-and-write gap.
+_ADMIT_WITH_EPOCH_LUA = """
+local expected = ARGV[1]
+local current = redis.call("GET", KEYS[1])
+if current == false or tostring(current) ~= tostring(expected) then
+  return -1
+end
+
+local n = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local prefix = ARGV[4]
+local products_key = prefix .. "wait:products"
+local product_ids = redis.call("SMEMBERS", products_key)
+local admitted = 0
+
+for _, product_id in ipairs(product_ids) do
+  local qkey = prefix .. "wait:q:" .. product_id
+  local ticket_ids = redis.call("ZRANGE", qkey, 0, n - 1)
+  for j, ticket_id in ipairs(ticket_ids) do
+    local tkey = prefix .. "wait:ticket:" .. ticket_id
+    local payload = redis.call("HGETALL", tkey)
+    if #payload == 0 then
+      redis.call("ZREM", qkey, ticket_id)
+    else
+      local map = {}
+      for k = 1, #payload, 2 do
+        map[payload[k]] = payload[k + 1]
+      end
+      local time = redis.call("TIME")
+      local token = redis.sha1hex(
+        ticket_id .. ":" .. tostring(current) .. ":" .. tostring(j) .. ":"
+        .. time[1] .. ":" .. time[2]
+      )
+      local token_body = cjson.encode({
+        ticket_id = ticket_id,
+        product_id = map["product_id"],
+        buyer_id = map["buyer_id"],
+      })
+      redis.call("SET", prefix .. "wait:token:" .. token, token_body, "EX", ttl)
+      redis.call("HSET", tkey, "status", "admitted", "admission_token", token)
+      redis.call("ZREM", qkey, ticket_id)
+      redis.call(
+        "PUBLISH",
+        prefix .. "admission:" .. ticket_id,
+        cjson.encode({
+          ticket_id = ticket_id,
+          admitted = true,
+          admission_token = token,
+          expires_in_seconds = ttl,
+        })
+      )
+      admitted = admitted + 1
+    end
+  end
+  if redis.call("ZCARD", qkey) == 0 then
+    redis.call("SREM", products_key, product_id)
+  end
+end
+return admitted
+"""
+
+
+async def admit_waiting_buyers(
+    redis: Redis,
+    batch_size: int | None = None,
+    *,
+    epoch: int,
+) -> int:
     """Pop up to N waiters per product and hand each a short-lived token.
 
     N is a valve on Postgres load, not a fairness tweak: each admitted buyer
     is about to run SELECT FOR UPDATE. Tokens expire so someone who walks
     away does not occupy a checkout slot forever; they must re-join.
+
+    epoch is the fencing token from this tick's hold_admission_leadership.
+    If it does not match the current leader epoch, this returns -1 and writes
+    nothing (stale leader after a freeze, not an error). An empty queue still
+    returns 0.
     """
     n = batch_size if batch_size is not None else ADMISSION_BATCH_SIZE
-    product_ids = await redis.smembers(_products_key())
-    admitted = 0
-    for product_id in product_ids:
-        ticket_ids = await redis.zrange(_queue_key(product_id), 0, n - 1)
-        for ticket_id in ticket_ids:
-            token = str(uuid.uuid4())
-            payload = await redis.hgetall(_ticket_key(ticket_id))
-            if not payload:
-                await redis.zrem(_queue_key(product_id), ticket_id)
-                continue
-            token_body = json.dumps(
-                {
-                    "ticket_id": ticket_id,
-                    "product_id": payload["product_id"],
-                    "buyer_id": payload["buyer_id"],
-                }
-            )
-            pipe = redis.pipeline()
-            pipe.set(_token_key(token), token_body, ex=ADMISSION_TOKEN_TTL_SECONDS)
-            pipe.hset(
-                _ticket_key(ticket_id),
-                mapping={"status": "admitted", "admission_token": token},
-            )
-            pipe.zrem(_queue_key(product_id), ticket_id)
-            await pipe.execute()
-            # Publish after the token key exists so a subscriber who then
-            # re-reads status cannot see "not admitted". Pub/sub is fire-and-
-            # forget: if nobody is subscribed yet, the message is dropped,
-            # which is why the SSE handler re-checks status after SUBSCRIBE.
-            await redis.publish(
-                admission_channel(ticket_id),
-                admission_event_payload(ticket_id, token),
-            )
-            admitted += 1
-        remaining = await redis.zcard(_queue_key(product_id))
-        set_queue_depth(product_id, int(remaining))
-        if remaining == 0:
-            await redis.srem(_products_key(), product_id)
-    return admitted
+    return int(
+        await redis.eval(
+            _ADMIT_WITH_EPOCH_LUA,
+            1,
+            leader_epoch_key(),
+            str(epoch),
+            str(n),
+            str(ADMISSION_TOKEN_TTL_SECONDS),
+            KEY_PREFIX,
+        )
+    )
 
 
 async def peek_admission_token(redis: Redis, token: str) -> dict | None:
