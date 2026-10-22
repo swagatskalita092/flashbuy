@@ -2,7 +2,7 @@
 
 FlashBuy is a flash-sale checkout backend. It sells a limited number of units under concurrent demand without overselling, by combining a Redis waiting room, row-level locks in PostgreSQL, idempotency keys, and reservation expiry.
 
-Headline numbers from a Locust run of 500 concurrent users against a product with stock 500. Full tables and method are in [docs/load_test_results.md](docs/load_test_results.md).
+Headline numbers from a Locust run of 500 concurrent users against a product with stock 500. Full tables and method are in [docs/load_test_results.md](docs/load_test_results.md). How to reproduce those runs is in [docs/reproducibility.md](docs/reproducibility.md). Verified failure modes, including the frozen-leader fencing case, are in [docs/failure-modes.md](docs/failure-modes.md). Build history is in [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md).
 
 | Metric | Result |
 | --- | --- |
@@ -20,7 +20,7 @@ A waiting room that is correct but **polls** still fails at scale: 5000 clients 
 
 That is a production infrastructure problem, not a toy race condition. Commercial virtual waiting rooms and anti-oversell systems (for example Queue-it) exist because e-commerce and ticketing sites need to drip buyers into checkout instead of opening a database transaction per visitor. FlashBuy is a small implementation of that same category of system. It is not a product competing with those vendors.
 
-For the full phase-by-phase build history — every bug found, every load test run, and the reasoning behind what was and wasn't added — see [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md).
+For the full phase-by-phase build history (every bug found, every load test run, and the reasoning behind what was and was not added), see [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md), [docs/load_test_results.md](docs/load_test_results.md), [docs/reproducibility.md](docs/reproducibility.md), and [docs/failure-modes.md](docs/failure-modes.md).
 
 ## Architecture
 
@@ -138,6 +138,8 @@ From `requirements.txt` and `docker-compose.yml`:
 docker-compose up --build
 ```
 
+If `docker compose up` fails with a port already allocated, something else on this machine is bound to a host port Compose wants. The known collisions are **5432** (Postgres) and **3000** (Grafana). Stop the other process or remap that port in `docker-compose.yml`. Grafana is not on the Locust path; Postgres is, so 5432 has to be free (or remapped) for tests that talk to the database from the host.
+
 | Service | URL |
 | --- | --- |
 | API | http://localhost:8000 |
@@ -239,7 +241,7 @@ docker run --rm -e LOADTEST_MODE=token_stress_sse -e PYTHONUNBUFFERED=1 \
 
 ## Results
 
-Figures below are from the 500-user Locust run recorded on 2026-08-26. Full tables, including why a 2000-user attempt was discarded, are in [docs/load_test_results.md](docs/load_test_results.md).
+Figures below are from the 500-user Locust run recorded on 2026-08-26. Full tables, including why a 2000-user attempt was discarded, are in [docs/load_test_results.md](docs/load_test_results.md). Reproduce the commands in [docs/reproducibility.md](docs/reproducibility.md). The journal is [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md). Failure cases including fencing are in [docs/failure-modes.md](docs/failure-modes.md).
 
 | | |
 | --- | --- |
@@ -265,7 +267,7 @@ A later `LOADTEST_MODE=token_stress` run (5000 users, stock 50, delayed checkout
 
 Replacing that poll with SSE (`LOADTEST_MODE=token_stress_sse`) on 2026-09-05, same 5000-user shape, produced **0 HTTP 503s** and **0 HTTP 500s**, peak live tokens **2160**, and **3460** concurrent open streams. Command-pool exhaustion from 1Hz polls is gone. The new bill is thousands of held HTTP and Redis SUBSCRIBE connections, plus a dedicated pub/sub pool of 6144. Locust did not print the CPU-too-high warning on the SSE run; it did on the polling re-run that same day (peak tokens 1899, 21221×503). Full table: [docs/load_test_results.md](docs/load_test_results.md).
 
-With more time I would run the same journey on cloud VMs, with Locust workers on separate hosts from the API, until the system actually breaks. That is how you tell whether Postgres, Redis, or admission rate is the bottleneck. Compose now runs three app replicas behind Caddy; Redis leader election keeps admission at 20/s. Multi-instance Locust numbers are in [docs/load_test_results.md](docs/load_test_results.md).
+With more time I would run the same journey on cloud VMs, with Locust workers on separate hosts from the API, until the system actually breaks. That is how you tell whether Postgres, Redis, or admission rate is the bottleneck. Compose now runs three app replicas behind Caddy; Redis leader election keeps admission at 20/s. Multi-instance Locust numbers are in [docs/load_test_results.md](docs/load_test_results.md). See also [docs/reproducibility.md](docs/reproducibility.md), [docs/failure-modes.md](docs/failure-modes.md), and [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md).
 
 ## License
 
