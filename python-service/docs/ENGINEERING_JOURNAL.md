@@ -15,6 +15,7 @@ Finding #3 Follow-Up — Replacing Polling with SSE
 Phase 5 — Multi-Instance, Chaos Testing, and Failure Modes
 Phase 5.5 — Documentation Consistency Pass
 Finding #4 — Frozen Leader and Fencing Tokens
+2026-10-22: README results alignment and CI
 The Two-Language Expansion
 Future Work — Phase 6 (Not Yet Implemented)
 Engineering Principles Applied Throughout
@@ -327,6 +328,16 @@ How it was found: outside feedback (Edilec on LinkedIn), not an internal chaos r
 Fix: a fencing epoch (`INCR` of `flashbuy:admission:leader_epoch` only on a new acquire, never on renew). Every admit Lua GET of that key must match the epoch from this tick's leadership result, in the same script as ZRANGE/SET/HSET/ZREM. Stale epoch returns **-1** (empty queue returns 0). The loop logs `admission rejected: stale epoch ...` so a live freeze is visible in `docker logs`.
 
 Verification: `test_stale_fencing_epoch_is_rejected_after_a_simulated_freeze` deletes A's lease (stand-in for TTL while frozen), lets B admit on a new epoch, then A calls admit with the old epoch and must get -1. The test was confirmed to fail when the Lua epoch check is removed (`assert 5 == 0`), then pass with the check restored. Live `docker pause` of the Locust-era leader confirmed leadership transfer (app3/epoch 1 → app2/epoch 2, 500 orders / 500 keys, no split-brain on `/health`). Direct stale-write rejection is proven by that unit test and the -1/log signal, not by a line in the live drill's app3 logs. The same drill also showed Caddy holding requests on the frozen replica for most of a minute; that timeout gap is recorded, not fixed here.
+
+<a name="readme-ci-2026-10-22"></a>
+
+2026-10-22: README results alignment and CI
+
+python-service/README.md headline and Results now report the committed 2026-09-16 three-replica run (500 of 500 checkouts, zero oversold, peak checkout 17.90 req/s under the 20 buyers per second admission cap, p99 1.2s / 1200 ms). The 2026-08-26 single-worker figures (p99 970 ms, peak checkout about 16.5 req/s) stay in the README as labelled history. The 204.00 aggregate req/s figure stays labelled as mostly status polls, not checkout capacity.
+
+A GitHub Actions workflow (.github/workflows/tests.yml) runs the 21 isolated pytest tests on every push and pull request to main, using the compose test profile (throwaway Postgres and Redis, no live replicas).
+
+Still not covered: no ruff or mypy in CI, chaos drills stay hand-run (Phase 5B in load_test_results.md, not part of CI), and there is still no committed CSV for the older 2026-08-26 run.
 
 <a name="two-language"></a>
 
