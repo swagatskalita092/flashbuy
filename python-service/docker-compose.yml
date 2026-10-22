@@ -112,8 +112,8 @@ services:
         hard: 65536
 
   # Isolated pytest deps. Not started by a normal `docker compose up`.
-  # There is no .github/workflows/ci.yml in this repo; this profile is the
-  # local stand-in: Postgres + Redis only, no admission-loop replicas.
+  # Tests run on every push and pull request through .github/workflows/tests.yml.
+  # This profile is Postgres + Redis only, no admission-loop replicas.
   postgres-test:
     profiles: ["test"]
     image: postgres:16-alpine
