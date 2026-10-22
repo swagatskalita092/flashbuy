@@ -2,15 +2,19 @@
 
 FlashBuy is a flash-sale checkout backend. It sells a limited number of units under concurrent demand without overselling, by combining a Redis waiting room, row-level locks in PostgreSQL, idempotency keys, and reservation expiry.
 
-Headline numbers from a Locust run of 500 concurrent users against a product with stock 500. Full tables and method are in [docs/load_test_results.md](docs/load_test_results.md). How to reproduce those runs is in [docs/reproducibility.md](docs/reproducibility.md). Verified failure modes, including the frozen-leader fencing case, are in [docs/failure-modes.md](docs/failure-modes.md). Build history is in [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md).
+Headline numbers from the committed 2026-09-16 Locust run: 500 users ramped at 25 per second for 3 minutes, stock 500, three app replicas (`app1`, `app2`, `app3`) behind Caddy. Evidence is in [evidence/baseline_rerun_2026-09-16_clean/](evidence/baseline_rerun_2026-09-16_clean/). Machine and reproduce command are in [docs/reproducibility.md](docs/reproducibility.md). Full tables and method, including earlier dates, are in [docs/load_test_results.md](docs/load_test_results.md). Verified failure modes, including the frozen-leader fencing case, are in [docs/failure-modes.md](docs/failure-modes.md). Build history is in [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md).
+
+Peak checkout rate is bounded by the admission cap (`ADMISSION_BATCH_SIZE` default 20 per tick, `ADMISSION_TICK_SECONDS` default 1, so 20 buyers per second per product). 17.90 req/s is not a throughput limit of the service.
+
+The committed run used Locust 2.46.4 in the container. `requirements.txt` now pins Locust 2.47.0.
 
 | Metric | Result |
 | --- | --- |
-| Concurrent users tested | 500 |
-| Successful checkouts | 500 |
+| Concurrent users tested | 500 (spawn 25/s, 3 minutes) |
+| Successful checkouts | 500 of 500 (HTTP 201) |
 | Final stock | 0 (zero oversold) |
-| Checkout latency (p50 / p95 / p99) | 140ms / 780ms / 970ms |
-| Peak checkout RPS | 16-20 (waiting-room admission cap) |
+| Checkout latency (p50 / p95 / p99) | 150 ms / 790 ms / 1.2 s (1200 ms) |
+| Peak checkout RPS | 17.90 (admission cap 20 buyers/s) |
 
 ## Why this matters
 
@@ -169,12 +173,12 @@ Re-running compose does not reset that product's stock to 500.
 
 ### Automated tests
 
-This repo has no `.github/workflows/ci.yml`. Run the suite the same way a CI job would: a throwaway Postgres and Redis, **no** app replicas, so the fixtures can `drop_all` without wiping a live stack.
+Tests run on every push and pull request through GitHub Actions using the isolated compose profile. That job starts a throwaway Postgres and Redis, **no** app replicas, so the fixtures can `drop_all` without wiping a live stack.
 
 From `python-service/`:
 
 ```bash
-docker compose --profile test run --rm --build test-runner
+docker compose --profile test run --rm --no-TTY test-runner
 ```
 
 That starts `postgres-test` (host port 5433) and `redis-test` (host port 6380), runs `pytest -vv` in a one-off container pointed at those hosts (`REDIS_URL` uses Redis DB 15), then removes the runner. `scripts/run_isolated_tests.sh` is the same command.
@@ -249,7 +253,7 @@ docker run --rm -e LOADTEST_MODE=token_stress_sse -e PYTHONUNBUFFERED=1 \
 
 ## Results
 
-Figures below are from the 500-user Locust run recorded on 2026-08-26. Full tables, including why a 2000-user attempt was discarded, are in [docs/load_test_results.md](docs/load_test_results.md). Reproduce the commands in [docs/reproducibility.md](docs/reproducibility.md). The journal is [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md). Failure cases including fencing are in [docs/failure-modes.md](docs/failure-modes.md).
+Figures below are from the committed 2026-09-16 Locust run (repo commit `1e5fc1c`, three replicas behind Caddy, Locust 2.46.4 in the container). CSV and console log: [evidence/baseline_rerun_2026-09-16_clean/](evidence/baseline_rerun_2026-09-16_clean/). Machine and reproduce command: [docs/reproducibility.md](docs/reproducibility.md). Full tables, including why a 2000-user attempt was discarded, are in [docs/load_test_results.md](docs/load_test_results.md). The journal is [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md). Failure cases including fencing are in [docs/failure-modes.md](docs/failure-modes.md).
 
 | | |
 | --- | --- |
@@ -259,11 +263,15 @@ Figures below are from the 500-user Locust run recorded on 2026-08-26. Full tabl
 | Checkout failures | 0 |
 | Final stock | 0 |
 | Oversold units | 0 |
-| `POST /checkout` p50 / p95 / p99 | 140 ms / 780 ms / 970 ms |
-| `POST /waiting-room/join` p50 / p95 / p99 | 440 ms / 1300 ms / 1500 ms |
-| Peak checkout RPS | ~16.5 (admission cap 20/s) |
+| `POST /checkout` p50 / p95 / p99 | 150 ms / 790 ms / 1.2 s (1200 ms) |
+| `POST /waiting-room/join` p50 / p95 / p99 | 210 ms / 510 ms / 610 ms |
+| Peak checkout RPS | 17.90 (admission cap 20 buyers/s) |
 
-That day's Locust ticker also peaked at 204.00 aggregate req/s. That figure is mostly status polls, not checkout throughput.
+Peak checkout rate is bounded by that admission cap (`ADMISSION_BATCH_SIZE` default 20 per tick with `ADMISSION_TICK_SECONDS` default 1). It is not a throughput limit of the service.
+
+Earlier run (2026-08-26, single Uvicorn worker, no committed CSV): `POST /checkout` p99 970 ms, peak checkout about 16.5 req/s. That day's Locust ticker also peaked at 204.00 aggregate req/s. That figure is mostly status polls, not checkout throughput, and not checkout capacity.
+
+Chaos tests (Redis kill, replica kill, and related drills) are hand-run Docker drills documented in [docs/load_test_results.md](docs/load_test_results.md) (Phase 5B). They are not part of CI. The Redis kill lost waiting-room state and left 25 items unsold.
 
 Concurrency correctness (50 concurrent checkouts, stock 10) is separate: Phase 1 oversold, Phase 2 did not. See [docs/race-condition-proof.md](docs/race-condition-proof.md).
 

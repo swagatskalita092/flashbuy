@@ -1,0 +1,23 @@
+# Runs the 21 isolated pytest tests and never touches the live replicas.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: python-service
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run isolated pytest
+        run: docker compose --profile test run --rm --no-TTY test-runner
+      - name: Tear down test profile
+        if: always()
+        run: docker compose --profile test down -v

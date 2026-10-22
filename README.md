@@ -1,5 +1,7 @@
 # FlashBuy
 
+[![tests](https://github.com/swagatskalita092/flashbuy/actions/workflows/tests.yml/badge.svg)](https://github.com/swagatskalita092/flashbuy/actions/workflows/tests.yml)
+
 This repository holds **two independent implementations** of the same flash-sale checkout problem: sell a limited stock under concurrent demand without overselling, using a waiting room, row-level locks, idempotency keys, and reservation expiry.
 
 The implementations are meant to be compared under **identical load-test scenarios** (same journey, same stock, same Locust shape), so concurrency and capacity behavior can be judged across stacks rather than as two unrelated demos.
@@ -7,7 +9,7 @@ The implementations are meant to be compared under **identical load-test scenari
 | Directory | Stack | Status |
 | --- | --- | --- |
 | [python-service/](python-service/) | Python, FastAPI, PostgreSQL, Redis | Working implementation with tests, Docker Compose, Locust, and write-up |
-| [java-service/](java-service/) | Java | In progress |
+| [java-service/](java-service/) | Java | Placeholder, not implemented yet |
 
 Start with **[python-service/README.md](python-service/README.md)** for architecture, how to run it, and recorded results. Run Compose and pytest from inside `python-service/` so paths in `docker-compose.yml` and the Dockerfile stay relative to that service.
 
