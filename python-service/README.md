@@ -166,12 +166,17 @@ Re-running compose does not reset that product's stock to 500.
 
 ### Automated tests
 
-Postgres and Redis must be reachable (for example via `docker-compose up`). Then, from the repo root:
+This repo has no `.github/workflows/ci.yml`. Run the suite the same way a CI job would: a throwaway Postgres and Redis, **no** app replicas, so the fixtures can `drop_all` without wiping a live stack.
+
+From `python-service/`:
 
 ```bash
-pip install -r requirements.txt
-pytest
+docker compose --profile test run --rm --build test-runner
 ```
+
+That starts `postgres-test` (host port 5433) and `redis-test` (host port 6380), runs `pytest -vv` in a one-off container pointed at those hosts (`REDIS_URL` uses Redis DB 15), then removes the runner. `scripts/run_isolated_tests.sh` is the same command.
+
+Do not run pytest against the docker-compose stack while the app replicas are up. It shares the same database and will wipe it. Host `pytest` on default 5432/6379 is the same trap if `app1`/`app2`/`app3` are using those ports.
 
 ### Manual buyer flow
 

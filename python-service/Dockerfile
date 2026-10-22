@@ -7,6 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY locustfile.py ./locustfile.py
+COPY tests ./tests
+COPY pytest.ini ./pytest.ini
 
 ENV PYTHONUNBUFFERED=1
 
