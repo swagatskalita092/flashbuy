@@ -299,6 +299,8 @@ Automated: `tests/test_admission_leader.py` runs three concurrent admit loops in
 
 ## 2026-09-05: Phase 5B chaos (kill one component mid Locust)
 
+These are hand-run Docker drills (`docker kill` / `docker start` during Locust). They are not part of CI.
+
 Same laptop, three app replicas + Caddy. Each scenario is its own `--users 500 --spawn-rate 25 --run-time 2m` against `http://lb:80`. Kill at ~8s into the run (during admission), restore after ~15–20s. Locust counts Caddy **502** as failures (not mapped 503). HTTP 500 stayed **0** in every run. Reservation TTL is 5 minutes, so `products.stock` later climbs back as the sweeper expires unpaid holds; order-row counts below are from `psql` after the runs.
 
 ### Finding: Caddy has no upstream health check; a dead replica is ~33% 502s

@@ -181,7 +181,7 @@ From `python-service/`:
 docker compose --profile test run --rm --no-TTY test-runner
 ```
 
-That starts `postgres-test` (host port 5433) and `redis-test` (host port 6380), runs `pytest -vv` in a one-off container pointed at those hosts (`REDIS_URL` uses Redis DB 15), then removes the runner. `scripts/run_isolated_tests.sh` is the same command.
+That starts `postgres-test` (host port 5433) and `redis-test` (host port 6380), runs `pytest -vv` in a one-off container pointed at those hosts (`REDIS_URL` uses Redis DB 15), then removes the runner. The same compose profile is used locally and in CI: `scripts/run_isolated_tests.sh` adds `--build`; CI runs the plain command with `--no-TTY`.
 
 Do not run pytest against the docker-compose stack while the app replicas are up. It shares the same database and will wipe it. Host `pytest` on default 5432/6379 is the same trap if `app1`/`app2`/`app3` are using those ports.
 
