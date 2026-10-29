@@ -92,7 +92,7 @@ warning. `psql`: 500 orders, 500 distinct idempotency keys, stock 0.
 | Oversold units | **0** |
 | Peak checkout RPS (history ticker) | **17.90** |
 | Peak aggregate RPS (history ticker) | 163.00 |
-| End-of-test average RPS | 115.75 |
+| Average aggregate RPS over the checkout window | 115.75 |
 
 Latency (Locust, milliseconds):
 
@@ -108,7 +108,7 @@ oversell.
 
 ## What the latency columns measure
 
-Latency figures are per request, as Locust records them. The checkout p50 / p95 / p99 is the `POST /checkout` call only. Time spent in the waiting room is recorded separately as `POST /waiting-room/join` and `GET /waiting-room/status` and is not included in the checkout latency. Peak checkout RPS (17.90) is the highest per-second value in the Locust history file. The average checkout rate over the full 3 minutes was about 15.5 req/s (`Requests/s` column of `baseline_rerun_stats.csv`).
+Latency figures are per request, as Locust records them. The checkout p50 / p95 / p99 is the `POST /checkout` call only. Time spent in the waiting room is recorded separately as `POST /waiting-room/join` and `GET /waiting-room/status` and is not included in the checkout latency. Peak checkout RPS (17.90) is the highest per-second value in the Locust history file. The 500 checkouts finished within about 32 seconds of the first one, so the Requests/s column of baseline_rerun_stats.csv (about 15.5) is the average over that active window. The 3 minute run time is the configured limit, not how long the sale took.
 
 - checkout: the checkout call only.
 - join: the waiting-room join call.
@@ -134,7 +134,7 @@ Raw artifacts:
 | Distinct idempotency keys | **500** ([psql_check.txt](../evidence/verification_rerun_2026-10-29/psql_check.txt), live Postgres after the test) |
 | `POST /checkout` p50 / p95 / p99 | 220 / 1100 / 1800 |
 | Peak checkout RPS | **19.80** (max of the current req/s column for POST /checkout in the Locust periodic stats table in console.txt; not `oct29_stats_history.csv`) |
-| End-of-test average checkout RPS | 18.69 (`Requests/s` column of `oct29_stats.csv`) |
+| Average checkout RPS over the checkout window | 18.69 (`Requests/s` column of `oct29_stats.csv`; the 500 orders were created within about 25 seconds, see psql_check.txt) |
 | Join failures | 1 HTTP 502 |
 | Locust exit | 1 |
 
