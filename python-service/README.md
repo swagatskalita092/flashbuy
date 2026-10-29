@@ -18,7 +18,7 @@ The committed run used Locust 2.46.4 in the container. `requirements.txt` now pi
 
 ### What these numbers measure
 
-Latency figures are per request, as Locust records them. The checkout p50 / p95 / p99 is the `POST /checkout` call only. Time spent in the waiting room is recorded separately as `POST /waiting-room/join` and `GET /waiting-room/status` and is not included in the checkout latency. Peak checkout RPS (17.90) is the highest per-second value in the Locust history file. The average checkout rate over the full 3 minutes was about 15.5 req/s (`Requests/s` column of `baseline_rerun_stats.csv`).
+Latency figures are per request, as Locust records them. The checkout p50 / p95 / p99 is the `POST /checkout` call only. Time spent in the waiting room is recorded separately as `POST /waiting-room/join` and `GET /waiting-room/status` and is not included in the checkout latency. Peak checkout RPS (17.90) is the highest value of Locust's current requests-per-second column for POST /checkout in the history file (a short rolling-window rate, not a per-second count). The average checkout rate over the full 3 minutes was about 15.5 req/s (`Requests/s` column of `baseline_rerun_stats.csv`). The load test never calls the confirm endpoint, so each successful checkout is a reservation. Unconfirmed reservations expire after 300 seconds and their stock is returned.
 
 ## Why this matters
 

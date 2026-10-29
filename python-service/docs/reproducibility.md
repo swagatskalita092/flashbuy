@@ -130,7 +130,7 @@ Raw artifacts:
 | | |
 | --- | ---: |
 | Successful checkouts (HTTP 201) | **500** (0 checkout failures) |
-| Final stock | **0** at Locust end-of-test (`LOADTEST final stock=0` in console.txt). Live psql after the test: stock 500 ([psql_check.txt](../evidence/verification_rerun_2026-10-29/psql_check.txt)) |
+| Final stock | **0** at Locust end-of-test (`LOADTEST final stock=0` in console.txt). At the later psql check the live stock was 500 and the orders were `expired` 500 ([psql_check.txt](../evidence/verification_rerun_2026-10-29/psql_check.txt)). Unconfirmed reservations expire after 300 seconds (`RESERVATION_TTL_SECONDS` default) and the sweeper returns stock. |
 | Distinct idempotency keys | **500** ([psql_check.txt](../evidence/verification_rerun_2026-10-29/psql_check.txt), live Postgres after the test) |
 | `POST /checkout` p50 / p95 / p99 | 220 / 1100 / 1800 |
 | Peak checkout RPS | **19.80** (max of the current req/s column for POST /checkout in the Locust periodic stats table in console.txt; not `oct29_stats_history.csv`) |
@@ -140,7 +140,7 @@ Raw artifacts:
 
 One HTTP 502 on `POST /waiting-room/join` (Caddy, documented in [load_test_results.md](load_test_results.md) Phase 5B). Locust therefore exited 1 even though the sale itself was clean (500 of 500 checkouts, stock 0).
 
-console.txt was re-encoded from UTF-16 LE to UTF-8 (content unchanged, checked) so it displays on GitHub.
+console.txt was re-encoded from UTF-16 LE to UTF-8 (content unchanged, checked) so it displays on GitHub. console.txt is a PowerShell capture. Lines starting with 'docker :' and 'At ...ps1' are PowerShell wrapping Docker's stderr; Locust output follows.
 
 `oct29_stats_history.csv` contains only Aggregated rows, so it does not record per-endpoint peak RPS. Peak checkout 19.80 is the maximum of the current req/s column for POST /checkout across the periodic stats table in [console.txt](../evidence/verification_rerun_2026-10-29/console.txt).
 
