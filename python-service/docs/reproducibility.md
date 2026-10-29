@@ -130,18 +130,18 @@ Raw artifacts:
 | --- | ---: |
 | Successful checkouts (HTTP 201) | **500** (0 checkout failures) |
 | Final stock (Locust `GET /products` and `psql`) | **0** |
-| Distinct idempotency keys (`psql` in the same session) | **500** |
+| Distinct idempotency keys | **500** (psql check run during that session; no committed file) |
 | `POST /checkout` p50 / p95 / p99 | 220 / 1100 / 1800 |
-| Peak checkout RPS (Locust ticker) | **19.80** |
-| End-of-test average checkout RPS | 18.69 |
+| Peak checkout RPS | **19.80** (UTF-16 `console.txt` ticker, not `oct29_stats_history.csv`) |
+| End-of-test average checkout RPS | 18.69 (`Requests/s` column of `oct29_stats.csv`) |
 | Join failures | 1 HTTP 502 |
 | Locust exit | 1 |
 
-One HTTP 502 on `POST /waiting-room/join` (Caddy, documented in [load_test_results.md](load_test_results.md) Phase 5B, not in failure-modes.md). Locust therefore exited 1 even though the sale itself was clean (500 of 500 checkouts, stock 0, 500 distinct keys).
+One HTTP 502 on `POST /waiting-room/join` (Caddy, documented in [load_test_results.md](load_test_results.md) Phase 5B). Locust therefore exited 1 even though the sale itself was clean (500 of 500 checkouts, stock 0). The 500 distinct idempotency keys came from a psql check run during that session and has no committed file.
 
-The history CSV for this run contains only Aggregated rows, so peak checkout RPS is taken from the console ticker (`POST /checkout` at 19.80 req/s), not from `oct29_stats_history.csv`.
+`oct29_stats_history.csv` contains only Aggregated rows, so it does not record per-endpoint peak RPS. Peak checkout 19.80 is in [console.txt](../evidence/verification_rerun_2026-10-29/console.txt) as UTF-16 LE (76 matches when decoded), not as UTF-8, so a byte grep for `19.80` does not hit.
 
-Run on the owner's own laptop with other apps open, so latency is higher than 2026-09-16. Not a regression, and the README headline stays on the committed 2026-09-16 run.
+Run on the owner's own laptop. Latency was higher than on 2026-09-16; this was not investigated further. The README headline stays on the committed 2026-09-16 run.
 
 ## A note on comparing throughput across dates
 
