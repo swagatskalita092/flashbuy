@@ -106,6 +106,43 @@ Checkout p50/p95 match the 2026-08-26 headline (140/780) within normal
 laptop variance. Correctness is the same: 500 reservations, stock 0, no
 oversell.
 
+## What the latency columns measure
+
+Latency figures are per request, as Locust records them. The checkout p50 / p95 / p99 is the `POST /checkout` call only. Time spent in the waiting room is recorded separately as `POST /waiting-room/join` and `GET /waiting-room/status` and is not included in the checkout latency. Peak checkout RPS (17.90) is the highest per-second value in the Locust history file. The average checkout rate over the full 3 minutes was about 15.5 req/s (`Requests/s` column of `baseline_rerun_stats.csv`).
+
+- checkout: the checkout call only.
+- join: the waiting-room join call.
+- status: one poll of ticket status; the default `stock_exhaust` mode polls, it does not use SSE.
+
+## 2026-10-29 verification run (not the committed headline)
+
+Same shape as the headline: 500 users, spawn 25/s, 3 minutes, stock 500, three replicas behind Caddy. Product `4de2bf67-e4c8-44a9-bc86-389e29e10c6a`. Locust 2.47.0 in the container. This is a later laptop re-run, not a replacement for the 2026-09-16 CSV.
+
+Raw artifacts:
+
+- [evidence/verification_rerun_2026-10-29/oct29_stats.csv](../evidence/verification_rerun_2026-10-29/oct29_stats.csv)
+- [evidence/verification_rerun_2026-10-29/oct29_failures.csv](../evidence/verification_rerun_2026-10-29/oct29_failures.csv)
+- [evidence/verification_rerun_2026-10-29/oct29_stats_history.csv](../evidence/verification_rerun_2026-10-29/oct29_stats_history.csv)
+- [evidence/verification_rerun_2026-10-29/oct29_exceptions.csv](../evidence/verification_rerun_2026-10-29/oct29_exceptions.csv)
+- [evidence/verification_rerun_2026-10-29/console.txt](../evidence/verification_rerun_2026-10-29/console.txt)
+
+| | |
+| --- | ---: |
+| Successful checkouts (HTTP 201) | **500** (0 checkout failures) |
+| Final stock (Locust `GET /products` and `psql`) | **0** |
+| Distinct idempotency keys (`psql` in the same session) | **500** |
+| `POST /checkout` p50 / p95 / p99 | 220 / 1100 / 1800 |
+| Peak checkout RPS (Locust ticker) | **19.80** |
+| End-of-test average checkout RPS | 18.69 |
+| Join failures | 1 HTTP 502 |
+| Locust exit | 1 |
+
+One HTTP 502 on `POST /waiting-room/join` (Caddy, documented in [load_test_results.md](load_test_results.md) Phase 5B, not in failure-modes.md). Locust therefore exited 1 even though the sale itself was clean (500 of 500 checkouts, stock 0, 500 distinct keys).
+
+The history CSV for this run contains only Aggregated rows, so peak checkout RPS is taken from the console ticker (`POST /checkout` at 19.80 req/s), not from `oct29_stats_history.csv`.
+
+Run on the owner's own laptop with other apps open, so latency is higher than 2026-09-16. Not a regression, and the README headline stays on the committed 2026-09-16 run.
+
 ## A note on comparing throughput across dates
 
 The original 2026-08-26 **204.00 req/s peak aggregate RPS** figure was

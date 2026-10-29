@@ -1,0 +1,2 @@
+Method,Name,Error,Occurrences,First Seen,Last Seen
+POST,/waiting-room/join,HTTPError('502 Server Error: Bad Gateway for url: /waiting-room/join'),1,2026-10-29T13:10:55Z,2026-10-29T13:10:55Z

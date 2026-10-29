@@ -16,6 +16,10 @@ The committed run used Locust 2.46.4 in the container. `requirements.txt` now pi
 | Checkout latency (p50 / p95 / p99) | 150 ms / 790 ms / 1.2 s (1200 ms) |
 | Peak checkout RPS | 17.90 (admission cap 20 buyers/s) |
 
+### What these numbers measure
+
+Latency figures are per request, as Locust records them. The checkout p50 / p95 / p99 is the `POST /checkout` call only. Time spent in the waiting room is recorded separately as `POST /waiting-room/join` and `GET /waiting-room/status` and is not included in the checkout latency. Peak checkout RPS (17.90) is the highest per-second value in the Locust history file. The average checkout rate over the full 3 minutes was about 15.5 req/s (`Requests/s` column of `baseline_rerun_stats.csv`).
+
 ## Why this matters
 
 Flash sales fail in a specific way. Thousands of people hit the same SKU in the same second, whether that is a concert on-sale, a Black Friday drop, or a console restock. The naive read-then-write path lets two transactions both see `stock > 0` and both succeed, so the shop sells more units than it has. Even after the write path is correct, the database still cannot absorb every concurrent checkout. Connections, lock waits, and query time pile up, and the site times out for everyone, including people who would have gotten a unit.
@@ -181,7 +185,13 @@ From `python-service/`:
 docker compose --profile test run --rm --no-TTY test-runner
 ```
 
-That starts `postgres-test` (host port 5433) and `redis-test` (host port 6380), runs `pytest -vv` in a one-off container pointed at those hosts (`REDIS_URL` uses Redis DB 15), then removes the runner. The same compose profile is used locally and in CI: `scripts/run_isolated_tests.sh` adds `--build`; CI runs the plain command with `--no-TTY`.
+That starts `postgres-test` (host port 5433) and `redis-test` (host port 6380), runs `pytest -vv` in a one-off container pointed at those hosts (`REDIS_URL` uses Redis DB 15), then removes the runner. The same compose profile is used locally and in CI: `scripts/run_isolated_tests.sh` adds `--build`; CI runs the plain command with `--no-TTY`. After the tests, remove only the two test containers:
+
+```bash
+docker compose --profile test rm -sfv postgres-test redis-test
+```
+
+Do not run `docker compose --profile test down -v` on a machine with the live stack running, because it also removes the app, Postgres and Redis containers and their volumes. CI uses it only because the runner is throwaway.
 
 Do not run pytest against the docker-compose stack while the app replicas are up. It shares the same database and will wipe it. Host `pytest` on default 5432/6379 is the same trap if `app1`/`app2`/`app3` are using those ports.
 
