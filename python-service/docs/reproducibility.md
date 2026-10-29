@@ -116,7 +116,7 @@ Latency figures are per request, as Locust records them. The checkout p50 / p95 
 
 ## 2026-10-29 verification run (not the committed headline)
 
-Same shape as the headline: 500 users, spawn 25/s, 3 minutes, stock 500, three replicas behind Caddy. Product `4de2bf67-e4c8-44a9-bc86-389e29e10c6a`. Locust 2.47.0 in the container. This is a later laptop re-run, not a replacement for the 2026-09-16 CSV.
+Same shape as the headline: 500 users, spawn 25/s, 3 minutes, stock 500, three replicas behind Caddy. Product `4de2bf67-e4c8-44a9-bc86-389e29e10c6a`. Locust 2.47.0 in the container (`Starting Locust 2.47.0` in console.txt). This is a later laptop re-run, not a replacement for the 2026-09-16 CSV.
 
 Raw artifacts:
 
@@ -125,21 +125,24 @@ Raw artifacts:
 - [evidence/verification_rerun_2026-10-29/oct29_stats_history.csv](../evidence/verification_rerun_2026-10-29/oct29_stats_history.csv)
 - [evidence/verification_rerun_2026-10-29/oct29_exceptions.csv](../evidence/verification_rerun_2026-10-29/oct29_exceptions.csv)
 - [evidence/verification_rerun_2026-10-29/console.txt](../evidence/verification_rerun_2026-10-29/console.txt)
+- [evidence/verification_rerun_2026-10-29/psql_check.txt](../evidence/verification_rerun_2026-10-29/psql_check.txt)
 
 | | |
 | --- | ---: |
 | Successful checkouts (HTTP 201) | **500** (0 checkout failures) |
-| Final stock (Locust `GET /products` and `psql`) | **0** |
-| Distinct idempotency keys | **500** (psql check run during that session; no committed file) |
+| Final stock | **0** at Locust end-of-test (`LOADTEST final stock=0` in console.txt). Live psql after the test: stock 500 ([psql_check.txt](../evidence/verification_rerun_2026-10-29/psql_check.txt)) |
+| Distinct idempotency keys | **500** ([psql_check.txt](../evidence/verification_rerun_2026-10-29/psql_check.txt), live Postgres after the test) |
 | `POST /checkout` p50 / p95 / p99 | 220 / 1100 / 1800 |
-| Peak checkout RPS | **19.80** (UTF-16 `console.txt` ticker, not `oct29_stats_history.csv`) |
+| Peak checkout RPS | **19.80** (max of the current req/s column for POST /checkout in the Locust periodic stats table in console.txt; not `oct29_stats_history.csv`) |
 | End-of-test average checkout RPS | 18.69 (`Requests/s` column of `oct29_stats.csv`) |
 | Join failures | 1 HTTP 502 |
 | Locust exit | 1 |
 
-One HTTP 502 on `POST /waiting-room/join` (Caddy, documented in [load_test_results.md](load_test_results.md) Phase 5B). Locust therefore exited 1 even though the sale itself was clean (500 of 500 checkouts, stock 0). The 500 distinct idempotency keys came from a psql check run during that session and has no committed file.
+One HTTP 502 on `POST /waiting-room/join` (Caddy, documented in [load_test_results.md](load_test_results.md) Phase 5B). Locust therefore exited 1 even though the sale itself was clean (500 of 500 checkouts, stock 0).
 
-`oct29_stats_history.csv` contains only Aggregated rows, so it does not record per-endpoint peak RPS. Peak checkout 19.80 is in [console.txt](../evidence/verification_rerun_2026-10-29/console.txt) as UTF-16 LE (76 matches when decoded), not as UTF-8, so a byte grep for `19.80` does not hit.
+console.txt was re-encoded from UTF-16 LE to UTF-8 (content unchanged, checked) so it displays on GitHub.
+
+`oct29_stats_history.csv` contains only Aggregated rows, so it does not record per-endpoint peak RPS. Peak checkout 19.80 is the maximum of the current req/s column for POST /checkout across the periodic stats table in [console.txt](../evidence/verification_rerun_2026-10-29/console.txt).
 
 Run on the owner's own laptop. Latency was higher than on 2026-09-16; this was not investigated further. The README headline stays on the committed 2026-09-16 run.
 

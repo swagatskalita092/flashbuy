@@ -1,0 +1,21 @@
+Run on 2026-10-29 21:05:34 +05:30, after the load test finished, against the live Postgres container. Not captured during the test.
+
+          List of relations
+ Schema |   Name   | Type  |  Owner   
+--------+----------+-------+----------
+ public | orders   | table | flashbuy
+ public | products | table | flashbuy
+(2 rows)
+
+
+                  id                  |       name       | stock 
+--------------------------------------+------------------+-------
+ 4de2bf67-e4c8-44a9-bc86-389e29e10c6a | Locust Flash SKU |   500
+(1 row)
+
+
+ orders | distinct_keys 
+--------+---------------
+    500 |           500
+(1 row)
+
