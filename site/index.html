@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlashBuy — a flash-sale checkout that never oversells</title>
+<meta name="description" content="FlashBuy: a flash-sale checkout backend built to never oversell under concurrent load. The bugs, the fixes, the real numbers, told in order.">
+<style>
+  :root {
+    --bg: #fbfbfa;
+    --surface: #ffffff;
+    --ink: #1a1a1a;
+    --muted: #5b5b5b;
+    --line: #e2e2e0;
+    --accent: #2c5f8a;
+    --accent-soft: #dce9f3;
+    --good: #1f7a3a;
+    --good-soft: #dcefe0;
+    --warn: #8a6d1a;
+    --warn-soft: #f6ecc9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a;
+      --surface: #1b1e24;
+      --ink: #eceef0;
+      --muted: #9aa0a8;
+      --line: #2b2f36;
+      --accent: #6fa8d8;
+      --accent-soft: #223246;
+      --good: #4fbd79;
+      --good-soft: #163322;
+      --warn: #d8b24a;
+      --warn-soft: #332b14;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 20px; }
+  header.hero {
+    padding: 72px 0 40px;
+    border-bottom: 1px solid var(--line);
+  }
+  header.hero .kicker {
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  header.hero h1 {
+    font-size: 2.3rem;
+    line-height: 1.2;
+    margin: 0 0 14px;
+  }
+  header.hero p.sub {
+    color: var(--muted);
+    font-size: 1.08rem;
+    max-width: 620px;
+    margin: 0 0 22px;
+  }
+  .badges { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .badges img { height: 20px; display: block; }
+  .badges a { line-height: 0; }
+  nav.links { margin-top: 18px; font-size: 0.95rem; }
+  nav.links a {
+    color: var(--accent);
+    text-decoration: none;
+    margin-right: 18px;
+  }
+  nav.links a:hover { text-decoration: underline; }
+
+  section { padding: 44px 0; border-bottom: 1px solid var(--line); }
+  section:last-of-type { border-bottom: none; }
+  h2 {
+    font-size: 1.5rem;
+    margin: 0 0 18px;
+  }
+  h3 { font-size: 1.1rem; margin: 26px 0 8px; }
+  p { margin: 0 0 14px; }
+  .muted { color: var(--muted); }
+
+  .callout {
+    background: var(--accent-soft);
+    border: 1px solid var(--accent);
+    border-radius: 10px;
+    padding: 14px 16px;
+    font-size: 0.96rem;
+    margin: 18px 0;
+  }
+  .callout.good { background: var(--good-soft); border-color: var(--good); }
+  .callout.warn { background: var(--warn-soft); border-color: var(--warn); }
+  .callout .label {
+    font-weight: 700;
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    display: block;
+    margin-bottom: 6px;
+    color: var(--muted);
+  }
+
+  .timeline { position: relative; margin-left: 10px; padding-left: 22px; border-left: 2px solid var(--line); }
+  .timeline .step { position: relative; padding-bottom: 26px; }
+  .timeline .step:last-child { padding-bottom: 0; }
+  .timeline .step::before {
+    content: "";
+    position: absolute;
+    left: -28px;
+    top: 4px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--bg);
+  }
+  .timeline .step.highlight::before { background: var(--warn); }
+  .timeline .step .when {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .timeline .step.highlight .when { color: var(--warn); }
+  .timeline .step h4 { margin: 4px 0 6px; font-size: 1.02rem; }
+  .timeline .step p { margin: 0; color: var(--muted); font-size: 0.96rem; }
+
+  table { width: 100%; border-collapse: collapse; margin: 14px 0 6px; font-size: 0.94rem; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  td.num, th.num { text-align: right; }
+
+  .stat-row { display: flex; gap: 14px; flex-wrap: wrap; margin: 20px 0; }
+  .stat {
+    flex: 1 1 140px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .stat .big { font-size: 1.6rem; font-weight: 700; }
+  .stat .lab { font-size: 0.8rem; color: var(--muted); margin-top: 2px; }
+
+  figure { margin: 22px 0; }
+  figcaption { font-size: 0.86rem; color: var(--muted); margin-top: 8px; text-align: center; }
+  .diagram-box {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 18px;
+    overflow-x: auto;
+  }
+  .mermaid { font-size: 14px; }
+
+  .chart-svg text { fill: var(--muted); font-size: 11px; }
+  .chart-svg .bar { fill: var(--accent); }
+  .chart-svg .bar-label { fill: var(--ink); font-weight: 700; font-size: 12px; }
+  .chart-svg .cap-line { stroke: var(--warn); stroke-width: 1.4; stroke-dasharray: 4 4; }
+  .chart-svg .baseline { stroke: var(--line); stroke-width: 1; }
+
+  ul.gaps { margin: 0; padding-left: 20px; }
+  ul.gaps li { margin-bottom: 8px; font-size: 0.96rem; }
+
+  footer {
+    padding: 40px 0 70px;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+  footer a { color: var(--accent); }
+  code { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; font-size: 0.9em; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="hero">
+    <div class="kicker">Flash-sale checkout backend</div>
+    <h1>FlashBuy never sells a unit it doesn't have</h1>
+    <p class="sub">A FastAPI, PostgreSQL and Redis checkout service built around one constraint: thousands of people can hit the same limited stock at once, and the count at the end still has to be exactly right.</p>
+    <div class="badges">
+      <a href="https://github.com/swagatskalita092/flashbuy/actions/workflows/tests.yml"><img src="https://github.com/swagatskalita092/flashbuy/actions/workflows/tests.yml/badge.svg" alt="tests status"></a>
+    </div>
+    <nav class="links">
+      <a href="https://github.com/swagatskalita092/flashbuy">Source on GitHub →</a>
+      <a href="https://github.com/swagatskalita092/flashbuy/blob/main/python-service/docs/ENGINEERING_JOURNAL.md">Engineering journal →</a>
+      <a href="https://github.com/swagatskalita092/flashbuy/blob/main/python-service/docs/load_test_results.md">Full load test results →</a>
+    </nav>
+  </header>
+
+  <section id="problem">
+    <h2>Why a flash sale is a hard problem</h2>
+    <p>A flash sale fails in one specific way: thousands of people hit the same SKU in the same second, whether that's a concert on-sale, a restock, or a Black Friday drop. The naive path reads the stock count, then writes an order, then decrements. Two requests can both read "stock is 1" before either writes, and both succeed. The shop sells a unit it doesn't have.</p>
+    <p>Fixing that read-then-write race is necessary but not sufficient. Once the write path is correct, the database still can't absorb every concurrent checkout at once: connections, lock waits and query time pile up, and the site slows down for everyone, including the people who would have gotten a unit fairly. And a waiting room that's correct but <em>polls</em> for status still falls over at scale, because thousands of clients asking "am I admitted yet?" once a second is thousands of mostly-wasted round trips.</p>
+    <p class="muted">This is the same category of problem commercial virtual waiting-room vendors solve for e-commerce and ticketing sites. FlashBuy is a from-scratch implementation of that category, not a competing product.</p>
+  </section>
+
+  <section id="build">
+    <h2>How it was built, in the order bugs were actually found</h2>
+    <p class="muted">Every phase below is reproducible from the commit history. Nothing here is a summary of what was planned; it's what happened, including the two phases that started broken on purpose.</p>
+    <div class="timeline">
+      <div class="step">
+        <div class="when">Phase 1</div>
+        <h4>A checkout that oversells, by design</h4>
+        <p>Read stock → insert order → decrement, no locking. The point was to prove the race condition first rather than assume it away. A script firing 50 concurrent checkouts against stock 10 produced 50 successes and 6 units left in a stock of 10 that should have hit zero at 10 sales: a real, measured oversell.</p>
+      </div>
+      <div class="step">
+        <div class="when">Phase 2</div>
+        <h4>Row locking, idempotency keys, reservation expiry</h4>
+        <p><code>SELECT ... FOR UPDATE</code> on the product row, a unique idempotency key per checkout, and a <code>reserved</code> order state that expires if never confirmed. The same 50-concurrent-checkout script against stock 10 now produces exactly 10 successes and 0 oversold.</p>
+      </div>
+      <div class="step">
+        <div class="when">Phase 3</div>
+        <h4>A Redis waiting room, so the database never sees the full crowd</h4>
+        <p>A per-product sorted set holds tickets; a drip-feed admission loop lets a capped number through per second, rate-limited per buyer and per IP with an atomic Lua token bucket so one client can't occupy the whole line.</p>
+      </div>
+      <div class="step">
+        <div class="when">Phase 4</div>
+        <h4>Observability and the first honest load test</h4>
+        <p>Prometheus, Grafana and a Locust journey script went in together. A 2,000-user attempt was tried and discarded: the load generator itself maxed out CPU on the laptop running it, so those numbers measured the test tool, not the service. The 500-user run that became the committed baseline was chosen because it's enough to exhaust the stock without that confound.</p>
+      </div>
+      <div class="step highlight">
+        <div class="when">Aug 30–31</div>
+        <h4>A real capacity limit, found by a stress test aimed at a specific number</h4>
+        <p>Outside feedback on an early write-up pointed at the actual worst case: admission rate × token TTL means up to 2,400 tokens could be outstanding at once. A targeted stress test confirmed it: <strong>21,977 HTTP 503s</strong>, almost all from clients polling status once a second against a Redis connection pool that wasn't sized for that.</p>
+      </div>
+      <div class="step">
+        <div class="when">Sep 5</div>
+        <h4>Status polling replaced with a push: Server-Sent Events</h4>
+        <p>Instead of asking "am I admitted yet?" once a second, clients now hold one SSE connection and get pushed a token the moment it exists. Same 5,000-user stress shape, same TTL math: <strong>503s went from 21,977 to 0</strong>. The honest trade-off, disclosed rather than hidden: up to 3,460 held-open connections instead.</p>
+      </div>
+      <div class="step">
+        <div class="when">Sep 5</div>
+        <h4>Three replicas, one admission leader</h4>
+        <p>Scaled to three horizontally-replicated FastAPI instances behind a Caddy load balancer. All three run the admission loop every tick, but only the Redis lock holder is allowed to admit, so three replicas don't triple the real admission rate to 60 buyers/sec instead of the intended 20.</p>
+      </div>
+      <div class="step highlight">
+        <div class="when">Oct 4</div>
+        <h4>The bug internal testing didn't find</h4>
+        <p>Phase 5B's chaos tests killed processes outright and always found the system safe. What they didn't try: a leader that <em>freezes</em> rather than dies, then resumes. That gap was pointed out from the outside, by a commenter on the original write-up, not from inside testing. Fix: a fencing epoch, incremented only on a fresh lock acquisition and checked atomically inside the same Lua script that performs the admission write, so a stale, resumed leader can no longer admit with an old lease. Verified with a deterministic regression test and a live container freeze/resume drill: leadership transferred cleanly, zero duplicate orders, zero oversold.</p>
+      </div>
+      <div class="step">
+        <div class="when">Oct 22–23</div>
+        <h4>Closing the gaps between the code and the story about the code</h4>
+        <p>A resume-readiness pass found three real, unglamorous problems and fixed all three: documentation that didn't link to itself, a test suite that had been running destructively against the live replica stack instead of an isolated one, and an architecture diagram that no longer matched the actual leader-election behavior. Real CI (GitHub Actions, 21 isolated tests on every push) was added the next day.</p>
+      </div>
+      <div class="step">
+        <div class="when">Oct 29</div>
+        <h4>Trusting nothing, re-verifying everything from a clean clone</h4>
+        <p>Two earlier internal notes about this project's own state disagreed with each other. Rather than pick one, the whole thing was re-verified from scratch: fresh clone, clean rebuild, a real test run, a real fresh Locust run, and an independent Postgres query to confirm the order count by hand instead of trusting Locust's own summary. That pass is also what caught a mislabeled latency figure before it reached a resume.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="numbers">
+    <h2>The real numbers</h2>
+    <p class="muted">From the committed 2026-09-16 Locust run: 500 simulated buyers, ramped at 25 per second, against a starting stock of exactly 500, three replicas behind Caddy. Raw CSVs and console output are committed to the repo, not just summarized here.</p>
+    <div class="stat-row">
+      <div class="stat"><div class="big">500 / 500</div><div class="lab">checkouts succeeded</div></div>
+      <div class="stat"><div class="big">0</div><div class="lab">units oversold</div></div>
+      <div class="stat"><div class="big">150 ms</div><div class="lab">checkout p50 latency</div></div>
+      <div class="stat"><div class="big">17.90 req/s</div><div class="lab">peak checkout rate</div></div>
+    </div>
+
+    <table>
+      <tr><th>Metric</th><th class="num">Result</th></tr>
+      <tr><td>Simulated users</td><td class="num">500 (spawn 25/s, 3 min)</td></tr>
+      <tr><td>Successful checkouts</td><td class="num">500 of 500 (HTTP 201)</td></tr>
+      <tr><td>Final stock / oversold</td><td class="num">0 / 0</td></tr>
+      <tr><td>Checkout latency p50 / p95 / p99</td><td class="num">150 ms / 790 ms / 1.2 s</td></tr>
+      <tr><td>Peak checkout rate</td><td class="num">17.90 req/s</td></tr>
+    </table>
+    <p class="muted" style="font-size:0.88rem;">Peak checkout rate is bounded on purpose by the admission cap (20 buyers/sec/product by default), not by how fast the service can go. The chart below is the evidence for that claim.</p>
+
+    <figure>
+      <div class="diagram-box">
+        <svg class="chart-svg" viewBox="0 0 480 220" role="img" aria-label="Bar chart: peak checkout requests per second stayed between 16.5 and 19.8 across three architecture generations spanning a single worker to three replicas with leader election, all below the 20 per second admission cap">
+          <line class="baseline" x1="40" y1="180" x2="450" y2="180"></line>
+          <line class="cap-line" x1="40" y1="30" x2="450" y2="30"></line>
+          <text x="452" y="26" text-anchor="start" font-size="11">cap: 20/s</text>
+
+          <rect class="bar" x="70" y="56.25" width="60" height="123.75" rx="4"></rect>
+          <text class="bar-label" x="100" y="48" text-anchor="middle">16.5</text>
+          <text x="100" y="198" text-anchor="middle">Aug 26</text>
+          <text x="100" y="211" text-anchor="middle">single worker</text>
+
+          <rect class="bar" x="210" y="31.5" width="60" height="148.5" rx="4"></rect>
+          <text class="bar-label" x="240" y="24" text-anchor="middle">19.8</text>
+          <text x="240" y="198" text-anchor="middle">Sep 5</text>
+          <text x="240" y="211" text-anchor="middle">3 replicas + leader lock</text>
+
+          <rect class="bar" x="350" y="45.75" width="60" height="134.25" rx="4"></rect>
+          <text class="bar-label" x="380" y="38" text-anchor="middle">17.9</text>
+          <text x="380" y="198" text-anchor="middle">Sep 16</text>
+          <text x="380" y="211" text-anchor="middle">committed baseline</text>
+        </svg>
+      </div>
+      <figcaption>Peak checkout throughput across three architecture generations, from one worker to three replicas with leader election. It stays in a 16.5–19.8 req/s band the whole way, because the waiting room caps admission at 20 buyers/sec/product on purpose. That's the rate limiter working as designed, not a ceiling the system happened to hit.</figcaption>
+    </figure>
+  </section>
+
+  <section id="architecture">
+    <h2>Architecture</h2>
+    <p>Buyer traffic goes through the waiting room before it can ever take a PostgreSQL row lock. Caddy load-balances across three FastAPI replicas. Every replica runs the admission loop on every tick, but only the current Redis lock holder is allowed to admit, so replicas can't multiply the real admission rate.</p>
+    <figure>
+      <div class="diagram-box">
+        <pre class="mermaid">
+%%{init: {"flowchart": {"nodeSpacing": 70, "rankSpacing": 90, "curve": "linear"}}}%%
+flowchart TB
+  buyer[Buyer]
+  caddy[Caddy load balancer]
+  buyer --> caddy
+  subgraph replicas [FastAPI replicas]
+    direction LR
+    subgraph r1 [Replica 1]
+      j1["join"]
+      c1["checkout"]
+      l1["admission loop"]
+    end
+    subgraph r2 [Replica 2]
+      j2["join"]
+      c2["checkout"]
+      l2["admission loop"]
+    end
+    subgraph r3 [Replica 3]
+      j3["join"]
+      c3["checkout"]
+      l3["admission loop"]
+    end
+  end
+  caddy --> j1
+  caddy --> c1
+  caddy --> j2
+  caddy --> c2
+  caddy --> j3
+  caddy --> c3
+  redis[(Redis)]
+  lock["Leader lock: SET EX 5s + epoch INCR on acquire"]
+  admit["Only the lock holder admits, 20 per tick"]
+  pg[(PostgreSQL)]
+  j1 -->|rate limited join| redis
+  j2 -->|rate limited join| redis
+  j3 -->|rate limited join| redis
+  l1 -->|acquire or renew| lock
+  l2 -->|acquire or renew| lock
+  l3 -->|acquire or renew| lock
+  lock --> redis
+  redis -->|sorted set per product| admit
+  lock -->|this tick's leader only| admit
+  admit -->|token + publish| redis
+  c1 -->|row lock + idempotency key| pg
+  c2 -->|row lock + idempotency key| pg
+  c3 -->|row lock + idempotency key| pg
+  c1 -->|201 / 409 / 403| buyer
+  c2 -->|201 / 409 / 403| buyer
+  c3 -->|201 / 409 / 403| buyer
+        </pre>
+      </div>
+      <figcaption>The actual topology: a drip-feed waiting room gates every buyer before checkout, three replicas share one admission lease so the cap holds under horizontal scale, and the row lock plus idempotency key hold the correctness guarantee once a buyer is through.</figcaption>
+    </figure>
+  </section>
+
+  <section id="honesty">
+    <h2>What's still missing, on purpose stated plainly</h2>
+    <p class="muted">A portfolio project is more convincing with a known-gaps list than without one. Nothing below is hidden in the code; all of it is already in the repo's own docs.</p>
+    <ul class="gaps">
+      <li><strong>No auth on any endpoint.</strong> Every route is open. Fine for a load-testing demo, not fine for anything real.</li>
+      <li><strong>Caddy has no upstream timeout.</strong> During the Oct 4 freeze/resume drill it kept routing to a frozen replica for about a minute before giving up. The fencing fix made that window safe, not short.</li>
+      <li><strong>Single Postgres instance.</strong> No replica, no failover story for the database itself, only for the app layer.</li>
+      <li><strong>java-service is an empty placeholder.</strong> The repo is structured for a second-language comparison under the same load-test shape; it hasn't been built yet.</li>
+      <li><strong>Confirm is not a real payment.</strong> The checkout flow proves reservation correctness under load, not a payment integration.</li>
+    </ul>
+  </section>
+
+  <footer>
+    <div class="wrap" style="padding:0;">
+      <p>Full build log, every load test table, and every failure mode: <a href="https://github.com/swagatskalita092/flashbuy/tree/main/python-service/docs">docs/</a> in the repo. Source: <a href="https://github.com/swagatskalita092/flashbuy">github.com/swagatskalita092/flashbuy</a>. MIT licensed.</p>
+    </div>
+  </footer>
+</div>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs";
+  const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral" });
+</script>
+
+</body>
+</html>
