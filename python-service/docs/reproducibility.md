@@ -146,6 +146,42 @@ console.txt was re-encoded from UTF-16 LE to UTF-8 (content unchanged, checked) 
 
 Run on the owner's own laptop. Latency was higher than on 2026-09-16; this was not investigated further. The README headline stays on the committed 2026-09-16 run.
 
+## Docker trap hit during the 2026-10-29 verification run
+
+The isolated pytest suite failed on the first attempt during this
+pass. Leftover `postgres-test` and `redis-test` containers had
+survived a Docker Desktop restart and were pointing at a dead Docker
+network. Fixing it took two commands:
+
+```bash
+docker rm -f postgres-test redis-test
+docker compose --profile test run --rm --no-TTY test-runner
+```
+
+After that the suite passed 21 of 21 in 10.43 seconds, live replicas
+untouched. Not a code bug, but worth checking for first if the
+isolated suite fails with a network error after restarting Docker
+Desktop.
+
+## What else the 2026-10-29 pass reconfirmed
+
+This load-test run was one part of a full from-scratch re-verification
+(fresh clone, clean rebuild) done to settle a contradiction between two
+earlier internal notes. The same pass also confirmed, independently of
+this file:
+
+- GitHub Actions CI is real and green: the last four runs of
+  `tests.yml` on `main` all passed (2m47s to 2m55s each).
+- The isolated pytest suite (21 tests) passes clean, see the Docker
+  trap note above.
+- The architecture diagram in the root README still matches the
+  running system (leader lock, epoch fencing, waiting room, status
+  codes).
+- `java-service/` is still an untouched placeholder.
+
+The README's headline numbers stay on the committed 2026-09-16 run by
+design, not because the 2026-10-29 run found a problem with them.
+
 ## A note on comparing throughput across dates
 
 The original 2026-08-26 **204.00 req/s peak aggregate RPS** figure was
