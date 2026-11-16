@@ -1,6 +1,7 @@
 # FlashBuy
 
 [![tests](https://github.com/swagatskalita092/flashbuy/actions/workflows/tests.yml/badge.svg)](https://github.com/swagatskalita092/flashbuy/actions/workflows/tests.yml)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24279725.svg)](https://doi.org/10.5281/zenodo.24279725)
 
 This repository holds **two independent implementations** of the same flash-sale checkout problem: sell a limited stock under concurrent demand without overselling, using a waiting room, row-level locks, idempotency keys, and reservation expiry.
 

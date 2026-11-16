@@ -1,5 +1,7 @@
 # FlashBuy
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24279725.svg)](https://doi.org/10.5281/zenodo.24279725)
+
 FlashBuy is a flash-sale checkout backend. It sells a limited number of units under concurrent demand without overselling, by combining a Redis waiting room, row-level locks in PostgreSQL, idempotency keys, and reservation expiry.
 
 Headline numbers from the committed 2026-09-16 Locust run: 500 users ramped at 25 per second for 3 minutes, stock 500, three app replicas (`app1`, `app2`, `app3`) behind Caddy. Evidence is in [evidence/baseline_rerun_2026-09-16_clean/](evidence/baseline_rerun_2026-09-16_clean/). Machine and reproduce command are in [docs/reproducibility.md](docs/reproducibility.md). Full tables and method, including earlier dates, are in [docs/load_test_results.md](docs/load_test_results.md). Verified failure modes, including the frozen-leader fencing case, are in [docs/failure-modes.md](docs/failure-modes.md). Build history is in [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md).
