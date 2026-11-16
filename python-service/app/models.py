@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -63,3 +63,36 @@ class Order(Base):
     )
 
     product: Mapped[Product] = relationship(back_populates="orders")
+
+
+class OutboxEvent(Base):
+    """One row per domain event this service has promised to deliver.
+
+    Phase 6 (transactional outbox). The row is inserted in the *same*
+    transaction that confirms an order (see app/routes/orders.py), so an
+    event can never be lost to a crash between "order confirmed" and
+    "event recorded" - either both happen (one commit) or neither does.
+
+    A separate publisher process (app/outbox_publisher.py) is the only
+    thing that reads this table for delivery; it sets `published_at` only
+    after RabbitMQ has confirmed receipt (publisher confirms), never
+    before. Until then a row is retried indefinitely - at-least-once
+    delivery, not exactly-once. See docs/ENGINEERING_JOURNAL.md Phase 6.
+    """
+
+    __tablename__ = "outbox_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    order_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orders.id"), nullable=False
+    )
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

@@ -29,6 +29,40 @@ services:
       timeout: 5s
       retries: 20
 
+  # Phase 6: durable event delivery. See docs/ENGINEERING_JOURNAL.md.
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # management UI (guest/guest is disabled remotely; use flashbuy/flashbuy)
+    environment:
+      RABBITMQ_DEFAULT_USER: flashbuy
+      RABBITMQ_DEFAULT_PASS: flashbuy
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Fulfillment Service's own database. Deliberately a separate container,
+  # not a separate schema on `postgres` above - see fulfillment-service/README.md.
+  postgres-fulfillment:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fulfillment
+      POSTGRES_PASSWORD: fulfillment
+      POSTGRES_DB: fulfillment
+    ports:
+      # 5433 is already used by the `postgres-test` profile below - do not
+      # reuse it (that exact collision is how this was caught: docker
+      # refused to start postgres-test with "port is already allocated").
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fulfillment -d fulfillment"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
   app1: &app
     build: .
     hostname: app1
@@ -69,6 +103,45 @@ services:
       - app1
       - app2
       - app3
+    restart: on-failure
+
+  # Phase 6: the only process that talks to RabbitMQ for `order.confirmed`
+  # events. Polls outbox_events written by app1-3's /orders/{id}/confirm.
+  outbox-publisher:
+    build: .
+    command: ["python", "-m", "app.outbox_publisher"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://flashbuy:flashbuy@postgres:5432/flashbuy
+      RABBITMQ_URL: amqp://flashbuy:flashbuy@rabbitmq:5672/
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: on-failure
+
+  fulfillment-consumer:
+    build: ../fulfillment-service
+    command: ["python", "-m", "app.consumer"]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://fulfillment:fulfillment@postgres-fulfillment:5432/fulfillment
+      RABBITMQ_URL: amqp://flashbuy:flashbuy@rabbitmq:5672/
+    depends_on:
+      postgres-fulfillment:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: on-failure
+
+  fulfillment-api:
+    build: ../fulfillment-service
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: postgresql+psycopg2://fulfillment:fulfillment@postgres-fulfillment:5432/fulfillment
+    depends_on:
+      postgres-fulfillment:
+        condition: service_healthy
     restart: on-failure
 
   prometheus:

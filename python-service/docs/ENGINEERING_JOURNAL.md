@@ -17,7 +17,7 @@ Phase 5.5 — Documentation Consistency Pass
 Finding #4 — Frozen Leader and Fencing Tokens
 2026-10-22: README results alignment and CI
 The Two-Language Expansion
-Future Work — Phase 6 (Not Yet Implemented)
+Phase 6 — Durable Event Delivery (Implemented)
 Engineering Principles Applied Throughout
 Appendix — Full Commit Timeline
 
@@ -356,45 +356,61 @@ python-service/ is complete, as documented across Phases 1 through 5.5 above. ja
 
 <a name="phase-6"></a>
 
-Future Work — Phase 6: Durable Event Delivery (Not Yet Implemented)
+Phase 6: Durable Event Delivery (Implemented)
 
-Status: designed, not started. This section documents a plan, not a shipped feature. No code referenced below exists in the repository yet.
+Status: implemented and chaos-tested. The plan below was written before any of this existed; it is left exactly as originally written (including the parts that turned out to need correcting) with one addition — a "What actually shipped" note after each planning subsection, so the gap between plan and reality stays visible rather than silently smoothed over. Full chaos-injection output, including two real bugs this verification found and fixed, is in docs/phase6_chaos_results.md.
 
 Why this is being recorded now, before any of it is built
 
 The rest of this document describes work that has already been built, measured, and verified. This section is different in kind: it is a considered engineering plan for a genuinely new distributed-systems problem that FlashBuy, as it currently stands, does not touch — kept here so the reasoning behind it is not lost, and so a future return to this work starts from a real design rather than a blank page.
 
+*(The paragraph above was true when it was written. It is kept verbatim because the decision process it documents — recording the plan before writing code — is itself worth preserving, not because Phase 6 is still just a plan.)*
+
 6.1 The problem this phase would address
 
 Every phase built so far solves problems that live inside a single service's boundary: protecting one service's own database from its own concurrent requests. Phase 6 would introduce a second, independent service — a Fulfillment Service — that needs to reliably learn when an order transitions from reserved to confirmed, without being in the same database transaction as the order itself. The moment two independent services need to agree on "did this happen," a much harder class of problem appears: the message announcing the event can be lost (if the publishing process crashes between committing the order and sending the message) or delivered more than once (if a retry fires after an ambiguous failure), and the receiving service must handle either outcome without either silently dropping a real order or duplicating its own side effect (in this case, creating two fulfillment jobs for one order).
+
+**What actually shipped:** exactly this - `app/routes/orders.py`'s `confirm_order` writes the `OutboxEvent` row in the same `db.add` / `db.commit()` as the status flip. Proven both by chaos-injection (docs/phase6_chaos_results.md) and by three regular pytest tests (tests/test_outbox.py) that run in CI on every push.
 
 6.2 Why Fulfillment was chosen over Payment as the second service
 
 A payment-service integration was considered and deliberately rejected for this phase. Payment introduces a return path (the order service needs to learn the outcome back from the payment service), which drags in failure compensation, refunds, and effectively the saga pattern — a substantially larger and different project. Fulfillment is one-directional (order confirmed → fulfillment job created) and isolates exactly the property worth proving: a committed database change must eventually cause exactly one logical downstream effect, despite unreliable message delivery.
 
+**What actually shipped:** Fulfillment Service (fulfillment-service/), its own Postgres container (`postgres-fulfillment`), own database, own schema. It has never queried python-service's database and never will — the only channel between them is the RabbitMQ event.
+
 6.3 The core mechanism: transactional outbox
 
 Rather than committing an order and separately attempting to publish an event (two operations that can fail independently, leaving the system in an inconsistent state if the process dies between them), the order-confirmation transaction would also insert a row into an outbox_events table, in the same database transaction. A separate publisher process would then read pending outbox rows and actually deliver them to a message broker, retrying on failure, only marking a row as published once the broker has confirmed receipt.
+
+**What actually shipped:** `outbox_events` table (app/models.py: `OutboxEvent`), a separate `outbox-publisher` container (app/outbox_publisher.py) polling every second for unpublished rows and marking a row published only after RabbitMQ's publisher-confirm comes back - never optimistically, never before.
 
 6.4 Broker choice: RabbitMQ over Kafka
 
 RabbitMQ was the planned choice specifically because its two explicit guarantees — publisher confirms (the broker has accepted responsibility for a message) and manual consumer acknowledgements (the consumer has finished processing a message) — map directly onto the two failure boundaries this phase exists to demonstrate. Kafka would work, but introducing it would pull the explanation toward partitions, consumer groups, and offset management — real concepts, but not the ones this phase is trying to isolate and prove.
 
+**What actually shipped:** as planned - `rabbitmq:3.13-management-alpine`, a durable topic exchange (`flashbuy.events`), publisher confirms via pika's `channel.confirm_delivery()`, manual consumer acks. Kafka was never introduced.
+
 6.5 The consumer side: an idempotent inbox
 
 The Fulfillment Service, on the receiving end, would record every event ID it has processed in an inbox_events table, in the same transaction that creates the resulting fulfillment job. A duplicate delivery of an already-processed event would be detected and safely ignored rather than creating a second fulfillment job — the property that makes "at-least-once delivery" survivable rather than dangerous.
+
+**What actually shipped:** `inbox_events` (unique on `event_id`) and `fulfillment_jobs` in fulfillment-service/app/models.py, written in the same local commit (fulfillment-service/app/consumer.py). A duplicate delivery hits the unique constraint, is caught, logged, and acked without creating a second job - proven in chaos Scenarios 1 and 2 in docs/phase6_chaos_results.md.
 
 6.6 Planned failure-injection scenarios
 
 Mirroring the chaos-testing discipline established in Phase 5B, the plan calls for deliberately: killing the publishing process after a database commit but before the event is published (reproducing the classic "dual-write" data-loss bug, on purpose, as a baseline before the fix); killing the publisher after the broker has confirmed receipt but before the local outbox row is marked published (deliberately causing a duplicate delivery, to prove the consumer handles it); killing the consumer after it commits its own database transaction but before it acknowledges the broker (again deliberately causing redelivery); simulating a sustained broker outage while checkouts continue; and sending a deliberately malformed "poison" event to confirm it is routed to a dead-letter queue without blocking unrelated valid events behind it.
 
+**What actually shipped:** four of the five ran as planned (full output in docs/phase6_chaos_results.md). The fifth - reproducing the dual-write bug as a "before" baseline - turned out to have no code path to trigger: the outbox write and the order-confirm write are not two operations that can fail independently, they are the same commit, so there is nothing to crash in between. That is explained rather than silently dropped in docs/phase6_chaos_results.md's "Baseline" section, and is itself evidence the architecture does what section 6.3 claims. Two real bugs were found and fixed while running these scenarios, not before: a wrong consumer-callback signature that crashed on the very first real message, and an uncaught `socket.gaierror` that crashed the publisher process on a transient DNS failure after a RabbitMQ restart instead of retrying. Both are detailed in docs/phase6_chaos_results.md.
+
 6.7 What "done" would mean
 
 This phase would not be considered complete merely because messages are flowing between two services. The explicit bar, carried over from how every other phase in this project has been judged: order state and its corresponding event must be provably atomic (one database transaction, not two operations that can diverge); the system must survive the broker being down without losing a single committed event; deliberately-caused duplicate deliveries must be proven, via an actual test run with actual numbers, to never result in a duplicate fulfillment job; and the README for this phase must say, explicitly, "at-least-once delivery, not exactly-once" — because claiming exactly-once delivery across two independent services would not be an honest description of what this architecture actually provides.
 
-6.8 Why this is being deferred rather than started now
+**What actually shipped:** every item in that bar, checked against real output rather than assumed. Atomicity: tests/test_outbox.py. Broker-outage survival: chaos Scenario 3. Duplicate deliveries proven to never duplicate a job: chaos Scenarios 1 and 2, with real counts via GET /jobs/by-order/{id}, not log inspection. The at-least-once (not exactly-once) framing is stated as plainly in fulfillment-service/README.md and the module docstrings as it is here.
 
-Weighed against this project's actual purpose — supporting a job search with a finite timeline — the remaining highest-leverage work on FlashBuy is not more engineering. It is: getting the already-complete, already-verified work represented accurately on an actual resume document, getting it integrated into an actual portfolio site, and being able to explain the decisions already made (leader election, the SSE tradeoff, the honestly-reported Redis chaos-test weak point) out loud, without the README open, in an interview. Phase 6 is realistically an 8-to-12-focused-day undertaking once started, given the same standard of chaos-testing and honest measurement applied to everything else here — a genuine and valuable extension, but one that should follow the lower-effort, higher-immediate-payoff work, not precede it.
+6.8 Why this was deferred, and why it was picked up when it was
+
+This section originally explained why Phase 6 was *not* being started yet: the project's higher-leverage work at the time was getting the already-complete backend represented accurately on a resume and portfolio site, not adding more engineering. That reasoning is kept here because it was the right call at the time, not a mistake later corrected. Phase 6 was picked back up once that lower-effort, higher-immediate-payoff work (the reproducibility.md fix, the public GitHub Pages story site, the frontend) was already done — exactly the ordering this section originally argued for, not an exception to it.
 
 <a name="principles"></a>
 

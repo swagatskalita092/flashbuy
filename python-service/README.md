@@ -127,6 +127,14 @@ Phase 3 put Redis in front of checkout. The waiting room is a sorted set plus a 
 
 Phase 4 added `prometheus-client` metrics, a Prometheus scrape config, a pre-provisioned Grafana dashboard, and a Locust file that walks join, status poll, then checkout. A 2000-user Locust run was attempted. Locust reported CPU usage too high, status polls returned thousands of HTTP 500s, and join latency was dominated by that overload, so those percentiles are not used as results. The recorded run is 500 users, which is enough to exhaust stock 500 without saturating the load generator. That choice is documented in `docs/load_test_results.md`.
 
+## Phase 6: durable event delivery
+
+Everything above lives inside one service's database transaction. Phase 6 adds a second, independent service — `fulfillment-service/`, its own Postgres database, no shared schema, no shared transaction — that has to reliably learn when an order is confirmed, using only a RabbitMQ event as the channel between them.
+
+The mechanism is a transactional outbox: confirming an order (`POST /orders/{id}/confirm`) writes an `outbox_events` row in the *same* commit as the status change, so there is no window where one happens without the other. A separate `outbox-publisher` process delivers that row to RabbitMQ using publisher confirms, marking it published only after the broker confirms receipt — never before. On the receiving end, `fulfillment-service`'s consumer records every event it has processed in an idempotent inbox (unique on event id) in the same transaction as creating the resulting fulfillment job, so a duplicate delivery — which this architecture explicitly allows, at-least-once, not exactly-once — never becomes a duplicate job.
+
+Five chaos scenarios (publisher crash after a broker confirm, consumer crash after a local commit, a sustained broker outage mid-checkout, a poison message, and why there's no dual-write-loss baseline to show) were run against the real containers, not simulated, including two real bugs the runs themselves found and fixed. Full output: [docs/phase6_chaos_results.md](docs/phase6_chaos_results.md). Design reasoning: [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md) §6.
+
 ## Tech stack
 
 From `requirements.txt` and `docker-compose.yml`:
@@ -143,7 +151,9 @@ From `requirements.txt` and `docker-compose.yml`:
 | Grafana 11.3.0 | Provisioned dashboard |
 | Locust | Journey load test |
 | pytest, pytest-asyncio, httpx | Automated tests |
-| Docker Compose | Three app replicas, Caddy load balancer, Postgres, Redis, Prometheus, Grafana, Locust |
+| RabbitMQ 3.13 | Phase 6: durable `order.confirmed` event delivery |
+| pika | RabbitMQ client (publisher confirms, manual consumer acks) |
+| Docker Compose | Three app replicas, Caddy load balancer, Postgres, Redis, Prometheus, Grafana, Locust, RabbitMQ, outbox publisher, Fulfillment Service + its own Postgres |
 
 ## How to run it locally
 
