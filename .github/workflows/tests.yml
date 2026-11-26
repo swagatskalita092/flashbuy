@@ -1,4 +1,4 @@
-# Runs the 21 isolated pytest tests and never touches the live replicas.
+# Runs the 28 isolated pytest tests and never touches the live replicas.
 name: tests
 
 on:

@@ -1,10 +1,40 @@
-# FlashBuy
+<div align="center">
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24279725.svg)](https://doi.org/10.5281/zenodo.24279725)
+<img src="../assets/banner.png" alt="FlashBuy. Flash-sale checkout and durable fulfillment. Sell limited stock under concurrent demand without overselling." width="100%">
+
+<br>
+
+[![tests](https://github.com/swagatskalita092/flashbuy/actions/workflows/tests.yml/badge.svg)](https://github.com/swagatskalita092/flashbuy/actions/workflows/tests.yml)
+![License](https://img.shields.io/badge/license-MIT-2563EB?style=for-the-badge&labelColor=111827)
+[![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.24279725-f97316?style=for-the-badge&labelColor=111827)](https://doi.org/10.5281/zenodo.24279725)
+
+[Repo root](../README.md) &nbsp;|&nbsp; [Engineering journal](docs/ENGINEERING_JOURNAL.md) &nbsp;|&nbsp; [Load test results](docs/load_test_results.md) &nbsp;|&nbsp; [Failure modes](docs/failure-modes.md) &nbsp;|&nbsp; [Reproducibility](docs/reproducibility.md)
+
+<br>
+
+<img src="../assets/architecture-flow.gif" alt="Animated diagram of a request moving through the waiting room, leader-only admission, the Postgres checkout lock, the transactional outbox, RabbitMQ, and the independent fulfillment service's idempotent inbox." width="900">
+
+</div>
+
+<br>
 
 FlashBuy is a flash-sale checkout backend. It sells a limited number of units under concurrent demand without overselling, by combining a Redis waiting room, row-level locks in PostgreSQL, idempotency keys, and reservation expiry.
 
-Headline numbers from the committed 2026-09-16 Locust run: 500 users ramped at 25 per second for 3 minutes, stock 500, three app replicas (`app1`, `app2`, `app3`) behind Caddy. Evidence is in [evidence/baseline_rerun_2026-09-16_clean/](evidence/baseline_rerun_2026-09-16_clean/). Machine and reproduce command are in [docs/reproducibility.md](docs/reproducibility.md). Full tables and method, including earlier dates, are in [docs/load_test_results.md](docs/load_test_results.md). Verified failure modes, including the frozen-leader fencing case, are in [docs/failure-modes.md](docs/failure-modes.md). Build history is in [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md).
+## <img src="../assets/icons/compass.svg" width="24" height="24" align="middle">&nbsp; Start here
+
+| Read | You will find |
+| --- | --- |
+| [Why this matters](#why-this-matters) | The two failure modes this project is actually about |
+| [Architecture](#architecture) | Full request-path diagram, leader election, and the admission math |
+| [Phase 6: durable event delivery](#phase-6-durable-event-delivery) | The transactional outbox, the chaos tests, and the bugs they found |
+| [How to run it locally](#how-to-run-it-locally) | `docker-compose up --build`, ports, and the seeded product |
+| [How to test it](#how-to-test-it) | Automated tests, the manual buyer flow, and load tests |
+| [Results](#results) | The committed 500-user Locust run, numbers and all |
+| [Limitations](#limitations-and-what-i-would-do-differently) | What the 2,000 and 5,000-user attempts actually showed |
+
+## <img src="../assets/icons/bar-chart.svg" width="24" height="24" align="middle">&nbsp; Headline numbers
+
+From the committed 2026-09-16 Locust run: 500 users ramped at 25 per second for 3 minutes, stock 500, three app replicas (`app1`, `app2`, `app3`) behind Caddy. Evidence is in [evidence/baseline_rerun_2026-09-16_clean/](evidence/baseline_rerun_2026-09-16_clean/). Machine and reproduce command are in [docs/reproducibility.md](docs/reproducibility.md). Full tables and method, including earlier dates, are in [docs/load_test_results.md](docs/load_test_results.md). Verified failure modes, including the frozen-leader fencing case, are in [docs/failure-modes.md](docs/failure-modes.md). Build history is in [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md).
 
 Peak checkout rate is bounded by the admission cap (`ADMISSION_BATCH_SIZE` default 20 per tick, `ADMISSION_TICK_SECONDS` default 1, so 20 buyers per second per product). 17.90 req/s is not a throughput limit of the service.
 
@@ -22,7 +52,7 @@ The committed run used Locust 2.46.4 in the container. `requirements.txt` now pi
 
 Latency figures are per request, as Locust records them. The checkout p50 / p95 / p99 is the `POST /checkout` call only. Time spent in the waiting room is recorded separately as `POST /waiting-room/join` and `GET /waiting-room/status` and is not included in the checkout latency. Peak checkout RPS (17.90) is the highest value of Locust's current requests-per-second column for POST /checkout in the history file (a short rolling-window rate, not a per-second count). The 500 checkouts finished within about 32 seconds of the first one, so the Requests/s column of baseline_rerun_stats.csv (about 15.5) is the average over that active window. The 3 minute run time is the configured limit, not how long the sale took. The load test never calls the confirm endpoint, so each successful checkout is a reservation. Unconfirmed reservations expire after 300 seconds and their stock is returned.
 
-## Why this matters
+## <img src="../assets/icons/alert.svg" width="24" height="24" align="middle">&nbsp; Why this matters
 
 Flash sales fail in a specific way. Thousands of people hit the same SKU in the same second, whether that is a concert on-sale, a Black Friday drop, or a console restock. The naive read-then-write path lets two transactions both see `stock > 0` and both succeed, so the shop sells more units than it has. Even after the write path is correct, the database still cannot absorb every concurrent checkout. Connections, lock waits, and query time pile up, and the site times out for everyone, including people who would have gotten a unit.
 
@@ -32,7 +62,7 @@ That is a production infrastructure problem, not a toy race condition. Commercia
 
 For the full phase-by-phase build history (every bug found, every load test run, and the reasoning behind what was and was not added), see [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md), [docs/load_test_results.md](docs/load_test_results.md), [docs/reproducibility.md](docs/reproducibility.md), and [docs/failure-modes.md](docs/failure-modes.md).
 
-## Architecture
+## <img src="../assets/icons/layers.svg" width="24" height="24" align="middle">&nbsp; Architecture
 
 Buyer traffic goes through the waiting room before it can take a PostgreSQL row lock. Caddy load-balances across three FastAPI replicas. Every replica runs the admission loop each tick; only the Redis lock holder admits, so replicas cannot multiply the admission rate. Observability is a separate scrape path. It does not sit on the checkout hot path.
 
@@ -117,7 +147,7 @@ What that maps to in the code:
 - `POST /orders/{order_id}/confirm` moves `reserved` to `confirmed`. A sweeper expires holds past `expires_at` (default 5 minutes from checkout) and returns the unit to stock.
 - `GET /metrics` is scraped by Prometheus. Grafana is provisioned to use that Prometheus datasource and load the FlashBuy flash sale dashboard.
 
-## How it was built
+## <img src="../assets/icons/terminal.svg" width="24" height="24" align="middle">&nbsp; How it was built
 
 Phase 1 shipped a working but unsafe checkout: read stock, insert an order, decrement, with no lock. The point was a real oversell bug, not a stub.
 
@@ -127,7 +157,7 @@ Phase 3 put Redis in front of checkout. The waiting room is a sorted set plus a 
 
 Phase 4 added `prometheus-client` metrics, a Prometheus scrape config, a pre-provisioned Grafana dashboard, and a Locust file that walks join, status poll, then checkout. A 2000-user Locust run was attempted. Locust reported CPU usage too high, status polls returned thousands of HTTP 500s, and join latency was dominated by that overload, so those percentiles are not used as results. The recorded run is 500 users, which is enough to exhaust stock 500 without saturating the load generator. That choice is documented in `docs/load_test_results.md`.
 
-## Phase 6: durable event delivery
+## <img src="../assets/icons/bolt.svg" width="24" height="24" align="middle">&nbsp; Phase 6: durable event delivery
 
 Everything above lives inside one service's database transaction. Phase 6 adds a second, independent service — `fulfillment-service/`, its own Postgres database, no shared schema, no shared transaction — that has to reliably learn when an order is confirmed, using only a RabbitMQ event as the channel between them.
 
@@ -135,7 +165,9 @@ The mechanism is a transactional outbox: confirming an order (`POST /orders/{id}
 
 Five chaos scenarios (publisher crash after a broker confirm, consumer crash after a local commit, a sustained broker outage mid-checkout, a poison message, and why there's no dual-write-loss baseline to show) were run against the real containers, not simulated, including four real bugs the runs themselves found and fixed: a consumer that crashed on every single message from a bad callback signature, a FastAPI response-model type mismatch that turned every response into a 500, a port conflict between two services, and a misleading log line plus an uncaught `OSError` that could crash the publisher outright. Full output, with each bug in the scenario where it surfaced: [docs/phase6_chaos_results.md](docs/phase6_chaos_results.md). Design reasoning: [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md) §6.
 
-## Tech stack
+Two gaps found in this same design pass are documented, one of them fixed and verified: see [docs/failure-modes.md](docs/failure-modes.md) #5 and #6.
+
+## <img src="../assets/icons/test-tube.svg" width="24" height="24" align="middle">&nbsp; Tech stack
 
 From `requirements.txt` and `docker-compose.yml`:
 
@@ -155,7 +187,7 @@ From `requirements.txt` and `docker-compose.yml`:
 | pika | RabbitMQ client (publisher confirms, manual consumer acks) |
 | Docker Compose | Three app replicas, Caddy load balancer, Postgres, Redis, Prometheus, Grafana, Locust, RabbitMQ, outbox publisher, Fulfillment Service + its own Postgres |
 
-## How to run it locally
+## <img src="../assets/icons/bolt.svg" width="24" height="24" align="middle">&nbsp; How to run it locally
 
 ```bash
 docker-compose up --build
@@ -185,7 +217,7 @@ On startup each app replica creates tables if needed and seeds one product if it
 
 Re-running compose does not reset that product's stock to 500.
 
-## How to test it
+## <img src="../assets/icons/shield.svg" width="24" height="24" align="middle">&nbsp; How to test it
 
 ### Automated tests
 
@@ -273,7 +305,7 @@ docker run --rm -e LOADTEST_MODE=token_stress_sse -e PYTHONUNBUFFERED=1 \
   --headless --users 5000 --spawn-rate 50 --run-time 10m
 ```
 
-## Results
+## <img src="../assets/icons/bar-chart.svg" width="24" height="24" align="middle">&nbsp; Results
 
 Figures below are from the committed 2026-09-16 Locust run (repo commit `1e5fc1c`, three replicas behind Caddy, Locust 2.46.4 in the container). CSV and console log: [evidence/baseline_rerun_2026-09-16_clean/](evidence/baseline_rerun_2026-09-16_clean/). Machine and reproduce command: [docs/reproducibility.md](docs/reproducibility.md). Full tables, including why a 2000-user attempt was discarded, are in [docs/load_test_results.md](docs/load_test_results.md). The journal is [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md). Failure cases including fencing are in [docs/failure-modes.md](docs/failure-modes.md).
 
@@ -297,7 +329,7 @@ Chaos tests (Redis kill, replica kill, and related drills) are hand-run Docker d
 
 Concurrency correctness (50 concurrent checkouts, stock 10) is separate: Phase 1 oversold, Phase 2 did not. See [docs/race-condition-proof.md](docs/race-condition-proof.md).
 
-## Limitations and what I would do differently
+## <img src="../assets/icons/alert.svg" width="24" height="24" align="middle">&nbsp; Limitations and what I would do differently
 
 A 2,000-user Locust run was also executed. Locust reported that CPU usage was too high on the local machine, status polls returned thousands of HTTP 500s, and join latency went into the multi-second range. That is a load-generator and single-laptop limit, not a measured ceiling for the checkout path, so those percentiles are not reported as results.
 
@@ -307,6 +339,6 @@ Replacing that poll with SSE (`LOADTEST_MODE=token_stress_sse`) on 2026-09-05, s
 
 With more time I would run the same journey on cloud VMs, with Locust workers on separate hosts from the API, until the system actually breaks. That is how you tell whether Postgres, Redis, or admission rate is the bottleneck. Compose now runs three app replicas behind Caddy; Redis leader election keeps admission at 20/s. Multi-instance Locust numbers are in [docs/load_test_results.md](docs/load_test_results.md). See also [docs/reproducibility.md](docs/reproducibility.md), [docs/failure-modes.md](docs/failure-modes.md), and [docs/ENGINEERING_JOURNAL.md](docs/ENGINEERING_JOURNAL.md).
 
-## License
+## <img src="../assets/icons/scale.svg" width="24" height="24" align="middle">&nbsp; License
 
 MIT. See [LICENSE](LICENSE).
