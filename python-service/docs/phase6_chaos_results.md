@@ -8,9 +8,10 @@ environment-variable hook that exists only for this purpose
 (`CHAOS_CRASH_AFTER_PUBLISH_CONFIRM`, `CHAOS_CRASH_AFTER_COMMIT_BEFORE_ACK`),
 never set outside these runs.
 
-Two real bugs were found and fixed *during* this verification, not before
-it - both are reported below in the scenario where they surfaced, the same
-way Bug #1/#2 and Finding #3/#4 are reported elsewhere in this journal.
+Four real bugs were found and fixed during this verification effort, not
+before it - each is reported below in the scenario where it surfaced, or in
+the summary at the end, the same way Bug #1/#2 and Finding #3/#4 are
+reported elsewhere in this journal.
 
 ## Baseline: why there is no "dual-write loss" run to show
 
