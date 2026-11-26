@@ -69,12 +69,15 @@ its own `outbox-retention` container on a loop, the same shape as
 not just asserted in prose, and `tests/test_outbox_retention.py` checks that
 invariant directly with a row backdated 365 days and a cutoff permissive
 enough to catch it by age alone, plus the ordinary delete/keep/batch-limit
-cases. **This was written without the project's own Postgres/RabbitMQ
-containers available to run it against** - the tests have not actually been
-executed yet, only compiled for syntax, so this is a candidate fix, not a
-proven one, until `./scripts/run_isolated_tests.sh` has actually been run
-and the new tests pass. `inbox_events` on the fulfillment-service side has
-the identical gap and is not yet fixed - same shape, separate work.
+cases. **Run against the project's real Postgres/Redis containers via
+`./scripts/run_isolated_tests.sh`** - all four new tests pass
+(`test_deletes_a_published_row_older_than_the_cutoff`,
+`test_keeps_a_published_row_newer_than_the_cutoff`,
+`test_never_deletes_an_unpublished_row_no_matter_how_old`,
+`test_respects_the_batch_limit`), alongside the existing 24, for 28/28.
+This is a proven fix, not a candidate one. `inbox_events` on the
+fulfillment-service side has the identical gap and is not yet fixed - same
+shape, separate work.
 
 ## 6. The outbox publisher is safe today only because exactly one instance runs
 
