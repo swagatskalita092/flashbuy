@@ -48,7 +48,7 @@ async def test_join_assigns_increasing_positions(public_client):
 
 
 async def test_admission_admits_buyers_over_multiple_ticks(public_client):
-    """Each tick only opens the valve a little — two ticks of size 2 admit 4 of 5."""
+    """Each tick only opens the valve a little: two ticks of size 2 admit 4 of 5."""
     product = await _create_product(public_client)
     tickets = []
     for i in range(5):

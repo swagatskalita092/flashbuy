@@ -6,7 +6,7 @@ empty, the request is rejected (HTTP 429) instead of being queued.
 
 Why a bucket instead of a fixed counter (e.g. INCR with a 60s TTL):
 - A fixed window lets a client fire 5 joins at 00:00:59 and 5 more at
-  00:01:00 — a burst of 10 in two seconds. The bucket spreads that: after
+  00:01:00, a burst of 10 in two seconds. The bucket spreads that: after
   spending 5 tokens they must wait for refill, even across a minute boundary.
 - Refill is continuous, so a buyer who waited 12 seconds gets some tokens
   back without waiting for the whole window to reset.

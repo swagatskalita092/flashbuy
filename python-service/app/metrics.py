@@ -16,7 +16,7 @@ These are not vanity counters. Under a drop, operators need to know:
 - Success vs rejection by reason: 409 means inventory is gone (expected at
   the end of a sale). 429 means the rate limiter is eating bots or we set
   the bucket too tight for real fans. 403 means tokens expired before
-  checkout — admission TTL or client slowness, not stock.
+  checkout: admission TTL or client slowness, not stock.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ def set_queue_depth(product_id: str, depth: int) -> None:
 
 
 def set_outstanding_tokens(count: int) -> None:
-    """How many valid tokens exist right now — the admission-rate * TTL backlog."""
+    """How many valid tokens exist right now: the admission-rate * TTL backlog."""
     admission_tokens_outstanding.set(count)
 
 

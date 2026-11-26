@@ -1,5 +1,5 @@
 """
-Prove that naive checkout oversells under concurrency — not a generic stress test.
+Prove that naive checkout oversells under concurrency, not a generic stress test.
 
 A stress test asks "can the server stay up under load?" This script asks a
 different question: "does the stock invariant survive simultaneous buyers?"
@@ -7,7 +7,7 @@ different question: "does the stock invariant survive simultaneous buyers?"
 It creates a product with exactly 10 units, then sends 50 checkout requests
 at the same time (different buyer_ids). If the app is correct, at most 10 of
 those requests can succeed and remaining stock cannot go negative. If more
-than 10 succeed, or stock is below zero, we did not merely "go slower" — we
+than 10 succeed, or stock is below zero, we did not merely "go slower." We
 sold units that never existed. That is a real inventory bug, the classic
 read-then-write race: two transactions both see stock > 0, both insert an
 order, both decrement, and the second write is based on a stale count.

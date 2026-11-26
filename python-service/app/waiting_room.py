@@ -8,7 +8,7 @@ Postgres. Most of those buyers cannot win a unit anyway. The waiting room
 moves the stampede to Redis: joining a sorted set is cheap, and a background
 loop admits only N buyers per second into the real checkout path.
 
-If the admission rate is **too high**, we are back to slamming Postgres —
+If the admission rate is **too high**, we are back to slamming Postgres,
 locks pile up and checkouts time out, which is the original problem. If it
 is **too low**, the sale feels frozen: stock sits unused while people wait,
 and impatient clients retry (which is why join is rate-limited). Tune N so
@@ -19,7 +19,7 @@ Why a sorted set (not a list)
 Each product has a sorted set scored by a monotonic join sequence (INCR).
 That is FIFO without depending on wall clocks. ZRANK is O(log N) for "what
 place am I?", which a LIST would answer with LPOS (O(N)). Admission is
-ZRANGE of the lowest scores, then ZREM — still logarithmic, still atomic
+ZRANGE of the lowest scores, then ZREM, still logarithmic, still atomic
 enough per ticket for this demo.
 """
 
@@ -61,7 +61,7 @@ def _products_key() -> str:
 
 
 def _seq_key(product_id: str) -> str:
-    """Monotonic score source — safer FIFO than timestamp if two joins share a ms."""
+    """Monotonic score source, safer FIFO than timestamp if two joins share a ms."""
     return redis_key("wait", "seq", product_id)
 
 

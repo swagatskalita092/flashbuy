@@ -155,7 +155,7 @@ export function App() {
             <div className="telemetry">
               <div className="label">AVAILABLE INVENTORY</div>
               <div className="mono stock">
-                {product ? String(product.stock).padStart(3, "0") : "—"}
+                {product ? String(product.stock).padStart(3, "0") : "--"}
               </div>
               <div className="mono stock-bottom">
                 <span>UNITS REMAINING</span>
@@ -176,7 +176,7 @@ export function App() {
                 <>
                   <div className="label">YOUR QUEUE POSITION</div>
                   <div className="position mono">
-                    {stage.position ?? "—"} <small>ahead of you</small>
+                    {stage.position ?? "--"} <small>ahead of you</small>
                   </div>
                   <p className="note">
                     Connected to the real SSE stream. Keep this tab open.

@@ -69,7 +69,7 @@ async def order_persisted(order_id, async_engine: AsyncEngine | None = None) -> 
 
 async def apply_schema(engine_to_use: AsyncEngine) -> None:
     """Create tables if needed, then add Phase 2 columns/indexes on old volumes."""
-    from app.models import Order, Product  # noqa: F401 — register models on Base.metadata
+    from app.models import Order, Product  # noqa: F401 - register models on Base.metadata
 
     async with engine_to_use.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

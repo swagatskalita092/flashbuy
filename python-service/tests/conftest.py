@@ -78,7 +78,7 @@ async def client(db_engine, session_factory, redis_db):
 
 @pytest.fixture
 async def public_client(db_engine, session_factory, redis_db):
-    """Same app, but no bypass header — waiting room and 403/429 behaviour."""
+    """Same app, but no bypass header: waiting room and 403/429 behaviour."""
 
     async def override_get_db():
         async with session_factory() as session:

@@ -7,7 +7,7 @@ the same host.
 Two runs. The 2000-user attempt is documented because that was the target;
 its latency is **not** used as the headline number. Locust itself printed
 `CPU usage was too high`, the API returned thousands of HTTP 500s on
-status polls, and join p50 was 9.8s — that is the laptop saturating, not a
+status polls, and join p50 was 9.8s, and that is the laptop saturating, not a
 measured checkout-path cost. Using those percentiles on a resume would be
 misleading.
 
@@ -74,7 +74,7 @@ On this machine, the **waiting room + row lock** path sold every unit exactly
 once: 500 reservations, stock 0, no oversell in either run. Checkout p95
 stayed under **780ms** with 500 concurrent simulated buyers polling about
 once a second. Admission (~20/s) is what bounds checkout RPS, which is the
-point of Phase 3 — Locust’s 204 req/s peak is mostly cheap status polls, not
+point of Phase 3: Locust’s 204 req/s peak is mostly cheap status polls, not
 204 database checkouts. Do not compare 204.00 to later checkout-only or
 SSE-era rates. The figure that stays in the same 16–20 band across dates
 is peak checkout RPS; see [reproducibility.md](reproducibility.md).
