@@ -1,6 +1,14 @@
-# Failure modes (verified)
+# Failure modes (verified, and two found but not yet fixed)
 
-Dated **2026-09-05**. These are the three cases Phase 5C asked for. Each was triggered in pytest (or Locust, where noted), not only reasoned about.
+Dated **2026-09-05**, extended **2026-11-26**. Cases 1 through 4 are the
+three cases Phase 5C asked for plus the frozen-leader case outside feedback
+surfaced; each was triggered in pytest (or Locust, where noted), not only
+reasoned about. Cases 5 and 6 are different in kind: they were found by
+reading the code against two known distributed-systems failure classes
+(unbounded outbox/inbox growth, and the lack of a claiming mechanism for a
+scaled-out poller), not by a test or a chaos drill, and neither is fixed
+here. They are recorded for the same reason the others are: so a real gap
+is written down honestly instead of discovered the hard way later.
 
 ## 1. Reservation-expiry job stops
 
@@ -45,3 +53,19 @@ A lease cannot close that. Check-then-act across two network calls is not atomic
 A live Locust 500-user `docker pause` of `python-service-app3-1` confirmed **no split-brain in leadership state**: `/health` moved from app3 / epoch 1 to app2 / epoch 2, and after resume app3 reported `admission_leader: false`. Orders: stock 0, **500** rows, **500** distinct idempotency keys. It did **not** prove a stale admit was refused on app3: uvicorn never logged the loop, and returning 0 used to look the same as an empty queue. The -1 return plus the log line are what make the next pause drill able to show a reject in `docker logs`.
 
 **Separate operational gap from the same drill, not fixed here:** Caddy has no short upstream timeout. Requests that landed on the frozen replica sat until unpause (checkout/status p99 ~90s). Documented, not patched in this change. Script: `scripts/chaos_pause_leader.sh`.
+
+## 5. Outbox and inbox tables grow without bound
+
+The transactional outbox (`outbox_events`) and the fulfillment service's idempotent inbox (`inbox_events`) are both append-only: a row is written once and never deleted. There is no retention job, no archival step, and no `DELETE` anywhere in `app/outbox_publisher.py`, `app/models.py`, or `fulfillment-service/app/consumer.py` - confirmed by grepping both services for `DELETE FROM`, `delete(`, `retention`, and `cleanup`, which returns nothing.
+
+At the throughput this project tests at, this is invisible. At real production volume it would not be: both tables grow forever, which eventually costs index size, vacuum time, and backup size on tables the application touches every poll cycle.
+
+**Not fixed here.** This was found by reading the code, not by a test, and nothing has been built against it. A real fix needs a decision this project hasn't made yet - delete published and processed rows after a retention window, archive them, or move to a log-based mechanism (CDC) that never needs a table at all - and that decision belongs to separate work, not a quick patch.
+
+## 6. The outbox publisher is safe today only because exactly one instance runs
+
+`_fetch_unpublished_batch` in `app/outbox_publisher.py` selects every row with `published_at IS NULL`, ordered by `created_at`, with no row-level claim: no `SELECT ... FOR UPDATE SKIP LOCKED`, no lease, no owner column. `docker-compose.yml` runs exactly one `outbox-publisher` container, so this is safe as deployed.
+
+If that service were ever scaled to two or more replicas for throughput, both would poll the same unclaimed rows and both would attempt to publish them - a real double-publish, not the single-publisher crash-and-retry duplicate the consumer's idempotent inbox is already built to tolerate. The inbox would still stop a duplicate *fulfillment job* from being created, so this would not corrupt data, but it would waste broker messages and complicate monitoring.
+
+**Not fixed here.** This is a scaling ceiling in the current design, not a bug in the system as it runs today. Documenting it is the point: a future change to run more than one publisher replica should not ship without the claiming logic it would then need.
