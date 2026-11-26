@@ -60,7 +60,21 @@ The transactional outbox (`outbox_events`) and the fulfillment service's idempot
 
 At the throughput this project tests at, this is invisible. At real production volume it would not be: both tables grow forever, which eventually costs index size, vacuum time, and backup size on tables the application touches every poll cycle.
 
-**Not fixed here.** This was found by reading the code, not by a test, and nothing has been built against it. A real fix needs a decision this project hasn't made yet - delete published and processed rows after a retention window, archive them, or move to a log-based mechanism (CDC) that never needs a table at all - and that decision belongs to separate work, not a quick patch.
+**Fixed for the outbox side.** `app/outbox_retention.py` deletes published
+`outbox_events` rows older than `OUTBOX_RETENTION_DAYS` (default 7), run as
+its own `outbox-retention` container on a loop, the same shape as
+`outbox_publisher.py`. The safety invariant - never delete a row with
+`published_at IS NULL`, regardless of age - is written into the query itself
+(it filters on `published_at IS NOT NULL` before it ever filters on age),
+not just asserted in prose, and `tests/test_outbox_retention.py` checks that
+invariant directly with a row backdated 365 days and a cutoff permissive
+enough to catch it by age alone, plus the ordinary delete/keep/batch-limit
+cases. **This was written without the project's own Postgres/RabbitMQ
+containers available to run it against** - the tests have not actually been
+executed yet, only compiled for syntax, so this is a candidate fix, not a
+proven one, until `./scripts/run_isolated_tests.sh` has actually been run
+and the new tests pass. `inbox_events` on the fulfillment-service side has
+the identical gap and is not yet fixed - same shape, separate work.
 
 ## 6. The outbox publisher is safe today only because exactly one instance runs
 

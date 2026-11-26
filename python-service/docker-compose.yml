@@ -120,6 +120,20 @@ services:
         condition: service_healthy
     restart: on-failure
 
+  # Follow-up to Phase 6: deletes published outbox_events rows older than
+  # OUTBOX_RETENTION_DAYS (default 7). Never touches an unpublished row,
+  # regardless of age - see app/outbox_retention.py and
+  # docs/failure-modes.md #5.
+  outbox-retention:
+    build: .
+    command: ["python", "-m", "app.outbox_retention"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://flashbuy:flashbuy@postgres:5432/flashbuy
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
   fulfillment-consumer:
     build: ../fulfillment-service
     command: ["python", "-m", "app.consumer"]
